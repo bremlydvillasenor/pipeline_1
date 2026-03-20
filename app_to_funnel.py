@@ -68,10 +68,12 @@ def transform(df: pl.DataFrame, config: dict) -> pl.DataFrame:
     - Input must be a Polars DataFrame containing all REQUIRED_COLS.
     - Stage coercions: 5 → 4, 7 → 6.
     - job_application_date is truncated to month-start.
-    - Rows where candidate_recruiting_status == 'Application in Process'
-      are excluded entirely (not exploded, not part of the output).
-    - Remaining rows are expanded to one row per stage reached (1,2,3,4,6,8).
-    - Only the last (max) stage row keeps the true status / disposition;
+    - Candidates with status 'Application in Process' are exploded only for
+      stages BEFORE last_stage_number (they have not completed that stage yet).
+      A candidate in stage 1 with this status produces zero rows and is absent
+      from the output entirely.
+    - All other candidates are expanded to one row per stage reached (1,2,3,4,6,8).
+    - Only the last stage row keeps the true status / disposition;
       all earlier stage rows get status='Passed' and null disposition fields.
     - Disposition mapping is left-joined from config['SCRUM_FILE'].
     """
@@ -104,32 +106,43 @@ def transform(df: pl.DataFrame, config: dict) -> pl.DataFrame:
         .alias("job_application_date")
     )
 
-    # --- Exclude "Application in Process" rows entirely ---
-    df = df.filter(
+    # --- Tag rows where the candidate is still in-process ---
+    df = df.with_columns(
         pl.col("candidate_recruiting_status")
         .str.strip_chars()
         .str.to_lowercase()
-        .ne(APPLICATION_IN_PROCESS)
+        .eq(APPLICATION_IN_PROCESS)
+        .alias("_in_process")
     )
 
-    if df.is_empty():
-        return df
-
-    # --- Build per-row list of stages reached ---
+    # --- Build per-row list of stages to explode ---
+    # In-process: stages BEFORE last_stage_number (candidate has not completed it yet)
+    # Completed:  stages UP TO AND INCLUDING last_stage_number
     df = df.with_columns(
-        pl.col("last_stage_number")
+        pl.struct(["last_stage_number", "_in_process"])
         .map_elements(
-            lambda x: [s for s in VALID_STAGES if s <= x] if x is not None else [],
+            lambda row: (
+                [s for s in VALID_STAGES if s < row["last_stage_number"]]
+                if row["_in_process"]
+                else [s for s in VALID_STAGES if s <= row["last_stage_number"]]
+            )
+            if row["last_stage_number"] is not None
+            else [],
             return_dtype=pl.List(pl.Int16),
         )
         .alias("_stage_list")
     )
 
+    if df.is_empty():
+        return df
+
     # --- Explode to one row per stage ---
+    # Rows whose stage list is empty (e.g. in-process at stage 1) produce no output rows.
     long = (
         df.explode("_stage_list")
         .rename({"_stage_list": "stage_number"})
         .filter(pl.col("stage_number").is_not_null())
+        .drop("_in_process")
     )
 
     # --- Add stage label ---
