@@ -299,7 +299,7 @@ def load(referrals_df: pl.DataFrame, config: dict) -> None:
 # MAIN PIPELINE
 # ─────────────────────────────────────────────────────────────
 
-def run_referral_pipeline(config: dict) -> Tuple[pl.DataFrame, pl.DataFrame]:
+def run_referral(config: dict) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """
     Runs the referral ETL and writes OUTPUT_REFERRALS_PARQUET.
 
