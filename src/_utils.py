@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,7 @@ __all__ = [
     "latest_file",
     "extract_date_from_filename",
     "add_date_slices",
+    "run_backup",
     # full class
     "ETLUtils",
 ]
@@ -207,6 +210,35 @@ class ETLUtils:
     # ──────────────────────────────
     # … (the rest of the previously-shared ETLUtils code stays intact) …
 
+    # ──────────────────────────────
+    # 6.  BACKUP
+    # ──────────────────────────────
+    @staticmethod
+    def run_backup() -> None:
+        """
+        Copy data/raw and data/processed into a date-stamped folder one level
+        above the project root (YYYY-MM-DD format). Overwrites if it exists.
+        """
+        today = datetime.today().strftime("%Y-%m-%d")
+        project_root = Path(__file__).resolve().parents[1]
+        backup_dest = project_root.parent / today
+
+        if backup_dest.exists():
+            shutil.rmtree(backup_dest)
+            logger.info("Overwriting existing backup: %s", backup_dest)
+
+        backup_dest.mkdir(parents=True)
+
+        for folder in ("raw", "processed"):
+            src = project_root / "data" / folder
+            if src.exists():
+                shutil.copytree(src, backup_dest / folder)
+                logger.info("Backed up %s → %s", src, backup_dest / folder)
+            else:
+                logger.warning("Backup source not found, skipped: %s", src)
+
+        logger.info("✅ Backup complete → %s", backup_dest)
+
 
 ###############################################################################
 # Aliases so old top-level imports still work                                 #
@@ -215,3 +247,4 @@ sanitize_id = ETLUtils.sanitize_id
 latest_file = ETLUtils.latest_file
 extract_date_from_filename = ETLUtils.extract_date_from_filename
 add_date_slices = ETLUtils.add_date_slices
+run_backup = ETLUtils.run_backup

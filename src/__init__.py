@@ -5,7 +5,7 @@ from .jobreq import run_jobreq
 from .hire import run_hire
 from .app import run_app
 from .referral import run_referral
-from .utils import run_backup
+from ._utils import run_backup
 
 __all__ = [
  "load_config",
