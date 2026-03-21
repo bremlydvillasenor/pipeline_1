@@ -7,29 +7,29 @@ import sys, pathlib
 #Import the revised config loader
 from src import (
     load_config, 
-    run_jobreq_pipeline, 
-    run_hire_pipeline,
-    run_app_pipeline,
-    run_referral_pipeline,
-    run_erp_pipeline
+    run_jobreq, 
+    run_hire,
+    run_app,
+    run_referral,
+    run_erp,
     run_backup
 )
 
 #Load config (switch YAML files as needed)
 config = load_config("config.yaml")
 
-#Run jobreq pipeline!
-run_jobreq_pipeline(config)
+#Run jobreq processing!
+run_jobreq(config)
 
-#Run hire pipeline!
-run_hire_pipeline(config)
+#Run hire processing!
+run_hire(config)
 
-#Run app pipeline!
-run_app_pipeline(config)
+#Run app processing!
+run_app(config)
 
-#Run referral pipeline!
-run_referral_pipeline(config)
-run_erp_pipeline(config)
+#Run referral and erp processing!
+run_referral(config)
+run_erp(config)
 
 #Backup Project
 run_backup()
