@@ -1,0 +1,35 @@
+# config/default.yaml
+
+data_root: "data"
+raw_data_root: "raw"
+historical_data_root: "historical"
+processed_data_root: "processed"
+
+scrum_file: "ta_scrum_file.xlsx"
+
+all_status_pattern: "MBPS Requisition - All Status*.xlsx"
+fulfillment_pattern: "*Fulfillment*.xlsx"
+intx_hires_pattern: "Recruiting - Internal and External Hires*.xlsx"
+movement_file81_pattern: "Company 81 - Employee Activity and Movement Report by Organization*.xlsx"
+movement_file322_pattern: "Company 322 - Employee Activity and Movement Report by Organization*.xlsx"
+daily_app_pattern: "MBPS Daily Application_2*.csv"
+prospect_pattern: "Referrals Without Job Applications*.xlsx"
+headcount_pattern: "pmd_monthly_headcount.xlsx"
+
+output_jobreqs_open_dmt: "jobreqs2_open_dmt.csv"
+output_jobreqs_csv: "jobreqs.csv"
+output_jobreqs_par: "jobreqs.parquet"
+
+output_hiresdb_par: "hiresdb.parquet"
+output_hires_csv: "hires.csv"
+output_hires_par: "hires.parquet"
+
+output_apps_csv: "applications.csv"
+output_apps_par: "applications.parquet"
+output_funnel_par: "app_funnel.parquet"
+
+output_referrals_par: "referrals.parquet"
+output_referrals_funnel_par: "referrals_funnel.parquet"
+output_mheadcount_par: "monthly_headcount.parquet"
+
+reqs_years_scope: 3
