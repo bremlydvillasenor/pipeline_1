@@ -61,8 +61,6 @@ def load_config(config_name="default.yaml", config_dir=None):
         "ALL_STATUS_PATTERN": cfg["all_status_pattern"],
         "FULFILLMENT_PATTERN": cfg["fulfillment_pattern"],
         "INTX_HIRES_PATTERN": cfg["intx_hires_pattern"],
-        "MOVEMENT_FILE81_PATTERN": cfg["movement_file81_pattern"],
-        "MOVEMENT_FILE322_PATTERN": cfg["movement_file322_pattern"],
         "DAILY_APP_PATTERN": cfg["daily_app_pattern"],
         "PROSPECT_PATTERN": cfg["prospect_pattern"],
         "HEADCOUNT_PATTERN": cfg["headcount_pattern"],
