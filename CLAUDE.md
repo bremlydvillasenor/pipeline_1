@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This is a Python-based HR/Recruiting data pipeline that processes Workday exports into clean parquet/CSV outputs for reporting and analytics. It covers job requisitions, hires, applications, referrals, ERP movement data, and monthly headcount.
+This is a Python-based HR/Recruiting data pipeline that processes Workday exports into clean parquet/CSV outputs for reporting and analytics. It covers job requisitions, hires, applications, referrals and ERP (Employee Referral Participation) Data.
 
 ## How to Run
 
@@ -34,7 +34,7 @@ pipeline_1/
 │   └── erp.py           # ERP movement data ETL
 └── data/
     ├── raw/             # Source Excel/CSV exports from Workday
-    ├── historical/      # Historical reference files (e.g., ta_scrum_file.xlsx)
+    ├── historical/      # Historical reference files (e.g., hiresdb.parquet)
     ├── processed/       # Output parquet/CSV files
     └── external/        # External reference data
 ```
@@ -45,7 +45,7 @@ pipeline_1/
 2. `run_hire(config)` — Processes hire/movement data
 3. `run_app(config)` — Processes daily application data + builds funnel
 4. `run_referral(config)` — Processes referral data
-5. `run_erp(config)` — Processes ERP movement data
+5. `run_erp(config)` — Processes ERP data
 6. `run_backup()` — Backs up the project
 
 ## Config System
@@ -61,8 +61,7 @@ Always use `config["KEY"]` (uppercase) when referencing paths and patterns insid
 
 ## Key Libraries
 
-- **Polars** — primary dataframe library (used in `app.py`, preferred for new work)
-- **Pandas** — used in older modules (`jobreq.py`, `hire.py`, `referral.py`, `erp.py`)
+- **Polars** — primary dataframe library
 - **PyYAML** — config loading
 - **openpyxl / xlsx support** — for reading Excel source files
 
@@ -75,13 +74,11 @@ All raw files are matched by glob patterns from `config.yaml`:
 | `ALL_STATUS_PATTERN` | Workday requisition all-status report |
 | `FULFILLMENT_PATTERN` | Fulfillment report |
 | `INTX_HIRES_PATTERN` | Internal/external hires report |
-| `MOVEMENT_FILE81_PATTERN` | Company 81 employee movement report |
-| `MOVEMENT_FILE322_PATTERN` | Company 322 employee movement report |
 | `DAILY_APP_PATTERN` | Daily application CSV (skip_rows=16) |
 | `PROSPECT_PATTERN` | Referrals without job applications |
 | `HEADCOUNT_PATTERN` | Monthly headcount file |
 
-The `ta_scrum_file.xlsx` (in `historical/`) contains reference sheets:
+The `ta_scrum_file.xlsx` (in `external/`) contains reference sheets:
 - `disposition_mapping` — maps raw disposition reasons to consolidated categories
 - `source_mapping` — maps source to consolidated_channel, channel_sort, internal_external
 
@@ -96,8 +93,7 @@ The funnel transforms one application row into multiple stage rows:
 ## Important Conventions
 
 - Use `latest_file(directory, pattern)` from `_utils` to find the most recent matching file
-- Use `extract_date_from_filename(path)` to get the refresh date from file names
-- Output files are always written to `PROCESSED_DATA_ROOT` as both `.csv` and `.parquet` (zstd compression)
+- Output files are always written to `PROCESSED_DATA_ROOT` as `.parquet` (zstd compression)
 - The `hiresdb.parquet` accumulates historical hire records and lives in `HISTORICAL_DATA_ROOT`
 - Level 9 compensation grade records are always excluded from applications
 - Applications are scoped to the last 4 years from the refresh date
