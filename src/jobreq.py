@@ -317,7 +317,7 @@ def _backlog_count(df: pd.DataFrame, refresh_date: pd.Timestamp) -> int:
 
 # ────────────── MAIN PIPELINE ──────────────
 
-def run_jobreq_pipeline(config: dict) -> tuple[pd.DataFrame, pd.Timestamp]:
+def run_jobreq(config: dict) -> tuple[pd.DataFrame, pd.Timestamp]:
     """
     End-to-end Job Requisitions ETL.
     Returns the final jobreq DataFrame.
