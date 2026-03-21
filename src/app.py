@@ -533,7 +533,7 @@ def load(dfs: dict, config: PipelineConfig) -> None:
 # MAIN PIPELINE
 # ═════════════════════════════════════════════
 
-def run_app_pipeline(config: PipelineConfig) -> dict:
+def run_app(config: PipelineConfig) -> dict:
     """Orchestrate full ETL for applications."""
     log.info("🚀 App ETL started...")
     _t0 = perf_counter()
