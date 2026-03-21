@@ -105,12 +105,7 @@ ENGINEERED_COLS: Final[list[str]] = [
     "candidate_recruiting_status_orig",
     "disposition_reason_orig",
     "recruiter_completed_offer_id",
-    "last_stage_number",
-    "consolidated_disposition", "consolidated_disposition_2",
-    "consolidated_channel", "channel_sort", "internal_external",
-    "is_non_auto_dispo", "is_candidate_driven_dispo",
-    "function", "sub_function", "rag_target_offer_acceptance_date",
-    "on_time_offer_accept", "complexity",
+    "last_stage_number"
 ]
 
 # Offer (6) through Ready for Hire (8)
@@ -133,7 +128,6 @@ FUNNEL_REQUIRED_COLS: Final[set[str]] = {
     "disposition_reason",
     "candidate_recruiting_status",
     "last_stage_number",
-    "on_time_offer_accept",
 }
 
 FUNNEL_VALID_STAGES: Final[list[int]] = [1, 2, 3, 4, 6, 8]
@@ -308,11 +302,6 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         .alias("completed_count"),
     )
 
-    # Load and left-join disposition mapping
-    dispo_map = pl.read_excel(config["SCRUM_FILE"], sheet_name="disposition_mapping")
-    if "disposition_reason" in dispo_map.columns:
-        long = long.join(dispo_map, on="disposition_reason", how="left")
-
     # Final column order (only those present)
     order_cols = [
         "job_requisition_id",
@@ -354,21 +343,6 @@ def extract(config: PipelineConfig) -> dict:
         pl.scan_csv(app_path, skip_rows=16)
         .select(list(APP_RENAME_MAP.keys()))
         .rename(APP_RENAME_MAP)
-    )
-
-    dispo_map_lf = (
-        pl.read_excel(config["SCRUM_FILE"], sheet_name="disposition_mapping")
-        .rename(DISPO_RENAME_MAP)
-        .lazy()
-    )
-
-    source_map_lf = (
-        pl.read_excel(
-            config["SCRUM_FILE"],
-            sheet_name="source_mapping",
-            columns=["source", "consolidated_channel", "channel_sort", "internal_external"],
-        )
-        .lazy()
     )
 
     parq_path: Path = config["OUTPUT_JOBREQS_PAR"]
@@ -463,17 +437,6 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
             pl.col("last_recruiting_stage").replace(STAGE_MAP, default=None).cast(pl.Int8).alias("last_stage_number")
         )
 
-    # Enrichment joins
-    if "disposition_reason" in schema and "disposition_reason" in dispo_map_lf.collect_schema().names():
-        lf = lf.join(dispo_map_lf, how="left", on="disposition_reason")
-
-    jr_cols = {"job_requisition_id", "function", "sub_function", "rag_target_offer_acceptance_date", "complexity"}
-    if jr_cols.issubset(jobreq_lf.collect_schema().names()):
-        lf = lf.join(jobreq_lf.select(list(jr_cols)), how="left", on="job_requisition_id")
-
-    if "source" in schema and "source" in source_map_lf.collect_schema().names():
-        lf = lf.join(source_map_lf, how="left", on="source")
-
     # Post-join schema (includes columns added by joins)
     post_schema = set(lf.collect_schema().names())
 
@@ -482,16 +445,6 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
         cleaned = pl.col("recruiter_completed_offer").cast(pl.Utf8).str.replace_all(r"\D+", "")
         lf = lf.with_columns(
             pl.when(cleaned == "").then(pl.lit("zzz_blank")).otherwise(cleaned).alias("recruiter_completed_offer_id")
-        )
-
-    # On-time offer acceptance vs RAG target (month-end inclusive)
-    if {"offer_accepted_date", "rag_target_offer_acceptance_date"}.issubset(post_schema):
-        rag_month_end = pl.col("rag_target_offer_acceptance_date").cast(pl.Date, strict=False).dt.month_end()
-        lf = lf.with_columns(
-            pl.when(pl.col("offer_accepted_date") <= rag_month_end)
-              .then(pl.lit("Yes"))
-              .otherwise(pl.lit(""))
-              .alias("on_time_offer_accept")
         )
 
     # Final column ordering
