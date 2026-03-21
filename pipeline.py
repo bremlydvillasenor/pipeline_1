@@ -1,43 +1,35 @@
 import sys
-#from pathlib import Path
-
-#Ensure src is on your sys.path for import
-#sys.path.append(str(Path(".."))) # If your notebook is in 'notebooks/' folder
 
 import sys, pathlib
 #print("cwd:", pathlib.Path.cwd())
 #print("sys.path[0]:", sys.path[0])
 
-#Import the revised config loader and jobreq ETL
+#Import the revised config loader
 from src import (
     load_config, 
-    run_jobreq_pipeline, 
-    run_hire_pipeline,
-    run_app_pipeline,
-    run_referral_pipeline,
-    run_backup, run_check
+    run_jobreq, 
+    run_hire,
+    run_app,
+    run_referral,
+    run_erp,
+    run_backup
 )
 
-#Check if Backup Folder already exist
-run_check()
-
 #Load config (switch YAML files as needed)
-config = load_config("default.yaml") # Or 'prod.yaml', 'test.yaml', etc.
+config = load_config("config.yaml")
 
-#Run jobreq pipeline!
-jr_df , refresh_date = run_jobreq_pipeline(config)
+#Run jobreq processing!
+run_jobreq(config)
 
-#Run hire pipeline!
-hire_df = run_hire_pipeline(config)
+#Run hire processing!
+run_hire(config)
 
-#Run app pipeline!
-app_df = run_app_pipeline(config)
+#Run app processing!
+run_app(config)
 
-#Run referral pipeline!
-referral_df, headcount_df, referral_funnel_df = run_referral_pipeline(config)
+#Run referral and erp processing!
+run_referral(config)
+run_erp(config)
 
 #Backup Project
-run_backup(refresh_date)
-
-#Show resulting DataFrame shape and preview data
-#print(f"Final shape: {jr_df.shape}")
+run_backup()
