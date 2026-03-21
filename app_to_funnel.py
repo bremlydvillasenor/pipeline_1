@@ -1,60 +1,31 @@
-# to_funnel.py
-
 from __future__ import annotations
-from typing import Iterable, Mapping
+
 import logging
-import re
-import pandas as pd
-import numpy as np
+import polars as pl
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-# -----------------------#
-#  Helpers / Conventions #
-# -----------------------#
+# -------------------------#
+#  Schema / Conventions    #
+# -------------------------#
 
-def normalize_colnames(df: pd.DataFrame) -> pd.DataFrame:
-    def to_snake(name: str) -> str:
-        s = name.strip().lower()
-        s = re.sub(r"[^\w\s]", " ", s)       # punctuation → space
-        s = re.sub(r"\s+", "_", s)           # spaces → _
-        s = re.sub(r"_+", "_", s).strip("_") # collapse _
-        return s or "col"
-
-    # 1) snake_case first
-    raw = [to_snake(c) for c in df.columns]
-
-    # 2) make unique (public, version-proof)
-    counts: dict[str, int] = {}
-    unique = []
-    for c in raw:
-        if c in counts:
-            counts[c] += 1
-            unique.append(f"{c}_{counts[c]}")
-        else:
-            counts[c] = 0
-            unique.append(c)
-
-    out = df.copy()
-    out.columns = unique
-    return out
-
-# canonical field names after normalize_colnames()
-REQ_COLS = {
+REQUIRED_COLS = {
     "candidate_id",
-    "added_date","job_application_date",
+    "added_date",
+    "job_application_date",
     "job_requisition_id",
     "recruiting_agency",
-    "source","consolidated_channel","internal_external",
+    "source",
+    "consolidated_channel",
+    "internal_external",
     "disposition_reason",
     "candidate_recruiting_status",
     "last_stage_number",
     "on_time_offer_accept",
 }
 
-# we keep/expand across these stages only
-VALID_STAGES = (1, 2, 3, 4, 6, 8)
+VALID_STAGES = [1, 2, 3, 4, 6, 8]
 
 STAGE_LABELS = {
     1: "Review",
@@ -65,175 +36,189 @@ STAGE_LABELS = {
     8: "Ready for Hire",
 }
 
-# -----------------------#
-#   ETL: EXTRACT STEP    #
-# -----------------------#
+_STAGE_MAP = pl.DataFrame(
+    {
+        "stage_number": pl.Series(list(STAGE_LABELS.keys()), dtype=pl.Int16),
+        "stage": pl.Series(list(STAGE_LABELS.values()), dtype=pl.Utf8),
+    }
+)
 
-def extract(source: pd.DataFrame | str | Mapping | Iterable) -> pd.DataFrame:
-    """
-    Accepts a DataFrame or a file path (CSV/Parquet). Returns raw DataFrame.
-    """
-    if isinstance(source, pd.DataFrame):
-        df = source.copy()
-    elif isinstance(source, str) and source.lower().endswith(".parquet"):
-        df = pd.read_parquet(source)
-    elif isinstance(source, str) and source.lower().endswith((".csv", ".txt")):
-        df = pd.read_csv(source)
-    else:
-        # fallback: try DataFrame constructor
-        df = pd.DataFrame(source)
-    return df
+APPLICATION_IN_PROCESS = "application in process"
 
 
-# -----------------------#
-#  ETL: TRANSFORM STEP   #
-# -----------------------#
-
-def transform(
-    df_raw: pd.DataFrame,
-    config: dict,
-    *,
-    drop_review_in_process: bool = True,
-) -> pd.DataFrame:
-    """
-    Transform candidate app rows into funnel rows.
-
-    Rules:
-      - Normalize column names to snake_case
-      - Coerce stage 5→4 and 7→6
-      - Expand to one row per stage REACHED (stages: 1,2,3,4,6,8)
-      - Only LAST stage keeps true status/disposition; earlier stages => Status="Passed", disposition=None
-      - Optional: drop (stage==1 & status == 'application in process') rows if drop_review_in_process=True
-    """
-    if df_raw.empty:
-        return df_raw.copy()
-
-    # 1) Normalize column names (Pythonic convention)
-    df = normalize_colnames(df_raw)
-
-    # 2) Keep only columns we actually use (tolerant if some are missing)
-    keep = [c for c in df.columns if c in REQ_COLS]
-    missing = sorted(list(REQ_COLS - set(keep)))
+def check_schema(df: pl.DataFrame) -> None:
+    """Raise ValueError if any required input column is absent."""
+    missing = REQUIRED_COLS - set(df.columns)
     if missing:
-        log.debug("Missing columns (ok if not needed downstream): %s", missing)
-    df = df[keep].copy()
-
-    # 3) Dtypes: last_stage_number -> Int16, date -> datetime (month start if present)
-    if "last_stage_number" in df.columns:
-        df["last_stage_number"] = pd.to_numeric(df["last_stage_number"], errors="coerce").astype("Int16")
-
-    if "job_application_date" in df.columns:
-        jad = pd.to_datetime(df["job_application_date"], errors="coerce")
-        # month-start (mirrors M's Date.StartOfMonth)
-        df["job_application_date"] = jad.dt.to_period("M").dt.to_timestamp()
-
-    # Map 5→4 and 7→6 up front so downstream never sees 5/7
-    if "last_stage_number" in df.columns:
-        df["last_stage_number"] = df["last_stage_number"].replace({5: 4, 7: 6}).astype("Int16")
-
-    # Build per-row stage list (only include VALID_STAGES up to max reached)
-    valid_set = set(VALID_STAGES)
-
-    def stage_list(max_stage: pd.Series | int) -> list[int]:
-        # filter to <= max and in valid set
-        return [s for s in VALID_STAGES if (s <= (max_stage if pd.notna(max_stage) else -1))]
-
-    df["stage_number_list"] = df["last_stage_number"].apply(stage_list)
-
-    # 7) Explode → one row per stage
-    long = df.explode("stage_number_list").rename(
-        columns={"stage_number_list": "stage_number"}
-    ).reset_index(drop=True)
-
-    # rows with no stages (NaNs) will appear; drop them
-    long = long[long["stage_number"].notna()].copy()
-    long["stage_number"] = long["stage_number"].astype("Int16")
-
-    # 8) Stage label
-    long["stage"] = long["stage_number"].map(STAGE_LABELS).astype("category")
-
-    # 9) Status/Disposition assignment: only last stage keeps truth; previous are "Passed"/NA
-    if "candidate_recruiting_status" in long.columns:
-        is_last = long["last_stage_number"] == long["stage_number"]
-        long["candidate_recruiting_status"] = np.where(
-            is_last,
-            long["candidate_recruiting_status"],
-            "Passed",
-        ).astype(str)
-
-    if "disposition_reason" in long.columns:
-        long["disposition_reason"] = long["disposition_reason"].where(
-            long["last_stage_number"] == long["stage_number"], other=pd.NA
+        raise ValueError(
+            f"Input DataFrame is missing required columns: {sorted(missing)}"
         )
 
-    if "on_time_offer_accept" in long.columns:
-        long["on_time_offer_accept"] = long["on_time_offer_accept"].where(
-            long["last_stage_number"] == long["stage_number"], other=pd.NA
-    )    
 
-    # 10) Optional helper flags (cheap & useful)
-    if "candidate_recruiting_status" in long.columns:
-        status_ci = long["candidate_recruiting_status"].astype(str).str.strip().str.lower()
-        in_process = (status_ci == "application in process")
-        long["in_process_count"] = in_process.astype("Int8")
-        long["completed_count"] = (~in_process).astype("Int8")
+# -------------------------#
+#  ETL: TRANSFORM STEP     #
+# -------------------------#
 
-    # Other mappings/loaders
-    dispo_map = pd.read_excel(
-        config["SCRUM_FILE"],
-        sheet_name="disposition_mapping",
+def transform(df: pl.DataFrame, config: dict) -> pl.DataFrame:
+    """
+    Transform a Polars DataFrame of candidate application rows into funnel rows.
+
+    Rules
+    -----
+    - Input must be a Polars DataFrame containing all REQUIRED_COLS.
+    - Stage coercions: 5 → 4, 7 → 6.
+    - job_application_date is truncated to month-start.
+    - Candidates with status 'Application in Process' are exploded only for
+      stages BEFORE last_stage_number (they have not completed that stage yet).
+      A candidate in stage 1 with this status produces zero rows and is absent
+      from the output entirely.
+    - All other candidates are expanded to one row per stage reached (1,2,3,4,6,8).
+    - Only the last stage row keeps the true status / disposition;
+      all earlier stage rows get status='Passed' and null disposition fields.
+    - Disposition mapping is left-joined from config['SCRUM_FILE'].
+    """
+    if not isinstance(df, pl.DataFrame):
+        raise TypeError(f"Expected a Polars DataFrame, got {type(df).__name__}")
+
+    if df.is_empty():
+        return df
+
+    check_schema(df)
+
+    # Keep only the columns we work with
+    df = df.select([c for c in df.columns if c in REQUIRED_COLS])
+
+    # --- Coerce last_stage_number; map 5→4, 7→6 ---
+    df = df.with_columns(
+        pl.when(pl.col("last_stage_number").cast(pl.Int16, strict=False) == 5)
+        .then(pl.lit(4, dtype=pl.Int16))
+        .when(pl.col("last_stage_number").cast(pl.Int16, strict=False) == 7)
+        .then(pl.lit(6, dtype=pl.Int16))
+        .otherwise(pl.col("last_stage_number").cast(pl.Int16, strict=False))
+        .alias("last_stage_number")
     )
-    dispo_map = normalize_colnames(dispo_map)    
 
-    # disposition mapping
-    if "disposition_reason" in df.columns and "disposition_reason" in dispo_map.columns:
-        long = long.merge(dispo_map, how="left", on="disposition_reason")
+    # --- Normalize job_application_date to month-start ---
+    df = df.with_columns(
+        pl.col("job_application_date")
+        .cast(pl.Date, strict=False)
+        .dt.truncate("1mo")
+        .alias("job_application_date")
+    )
 
-    # 11) Order & final dtypes
+    # --- Tag rows where the candidate is still in-process ---
+    df = df.with_columns(
+        pl.col("candidate_recruiting_status")
+        .str.strip_chars()
+        .str.to_lowercase()
+        .eq(APPLICATION_IN_PROCESS)
+        .alias("_in_process")
+    )
+
+    # --- Build per-row list of stages to explode ---
+    # In-process: stages BEFORE last_stage_number (candidate has not completed it yet)
+    # Completed:  stages UP TO AND INCLUDING last_stage_number
+    df = df.with_columns(
+        pl.struct(["last_stage_number", "_in_process"])
+        .map_elements(
+            lambda row: (
+                [s for s in VALID_STAGES if s < row["last_stage_number"]]
+                if row["_in_process"]
+                else [s for s in VALID_STAGES if s <= row["last_stage_number"]]
+            )
+            if row["last_stage_number"] is not None
+            else [],
+            return_dtype=pl.List(pl.Int16),
+        )
+        .alias("_stage_list")
+    )
+
+    if df.is_empty():
+        return df
+
+    # --- Explode to one row per stage ---
+    # Rows whose stage list is empty (e.g. in-process at stage 1) produce no output rows.
+    long = (
+        df.explode("_stage_list")
+        .rename({"_stage_list": "stage_number"})
+        .filter(pl.col("stage_number").is_not_null())
+        .drop("_in_process")
+    )
+
+    # --- Add stage label ---
+    long = long.join(_STAGE_MAP, on="stage_number", how="left")
+
+    # --- Status / disposition: only last stage row keeps truth ---
+    is_last = pl.col("last_stage_number") == pl.col("stage_number")
+
+    long = long.with_columns(
+        pl.when(is_last)
+        .then(pl.col("candidate_recruiting_status"))
+        .otherwise(pl.lit("Passed"))
+        .alias("candidate_recruiting_status"),
+        pl.when(is_last)
+        .then(pl.col("disposition_reason"))
+        .otherwise(pl.lit(None, dtype=pl.Utf8))
+        .alias("disposition_reason"),
+        pl.when(is_last)
+        .then(pl.col("on_time_offer_accept"))
+        .otherwise(pl.lit(None, dtype=pl.Utf8))
+        .alias("on_time_offer_accept"),
+    )
+
+    # --- Helper flags ---
+    status_norm = (
+        pl.col("candidate_recruiting_status").str.strip_chars().str.to_lowercase()
+    )
+    long = long.with_columns(
+        pl.when(status_norm == APPLICATION_IN_PROCESS)
+        .then(pl.lit(1, dtype=pl.Int8))
+        .otherwise(pl.lit(0, dtype=pl.Int8))
+        .alias("in_process_count"),
+        pl.when(status_norm != APPLICATION_IN_PROCESS)
+        .then(pl.lit(1, dtype=pl.Int8))
+        .otherwise(pl.lit(0, dtype=pl.Int8))
+        .alias("completed_count"),
+    )
+
+    # --- Load and left-join disposition mapping ---
+    dispo_map = pl.read_excel(
+        config["SCRUM_FILE"], sheet_name="disposition_mapping"
+    )
+    if "disposition_reason" in dispo_map.columns:
+        long = long.join(dispo_map, on="disposition_reason", how="left")
+
+    # --- Final column order (only those present) ---
     order_cols = [
         "job_requisition_id",
         "candidate_id",
-        "added_date","job_application_date",
-        "last_stage_number",          # original (mapped) max stage reached
-        "stage_number",              # exploded per-stage row
-        "stage",                     # label
+        "added_date",
+        "job_application_date",
+        "last_stage_number",
+        "stage_number",
+        "stage",
         "candidate_recruiting_status",
         "recruiting_agency",
-        "source","consolidated_channel","internal_external",
-        "disposition_reason","is_dispo",
-        "consolidated_disposition","consolidated_disposition_2",
-        "is_non_auto_dispo","is_candidate_driven_dispo",
-        "in_process_count","completed_count",
+        "source",
+        "consolidated_channel",
+        "internal_external",
+        "disposition_reason",
+        "is_dispo",
+        "consolidated_disposition",
+        "consolidated_disposition_2",
+        "is_non_auto_dispo",
+        "is_candidate_driven_dispo",
+        "in_process_count",
+        "completed_count",
         "on_time_offer_accept",
     ]
-    
-    # keep only those that exist
-    order_cols = [c for c in order_cols if c in long.columns]
-    long = long[order_cols].copy()
+    return long.select([c for c in order_cols if c in long.columns])
 
-    # Cast some low-cardinality text to category (memory-friendly)
-    for c in ("stage", 
-              "source","consolidated_channel","internal_external",
-              "disposition_reason","consolidated_disposition","consolidated_disposition_2",
-              "recruiting_agency", "on_time_offer_accept"):
-        if c in long.columns:
-            long[c] = long[c].astype("category")
 
-    return long
+# -------------------------#
+#     Orchestrator         #
+# -------------------------#
 
-# -----------------------#
-#     Orchestrator       #
-# -----------------------#
-
-def run(
-    source: pd.DataFrame | str | Mapping | Iterable,
-    *,
-    config: dict,
-    drop_review_in_process: bool = False,
-) -> pd.DataFrame:
-    """
-    Full ETL: extract → transform
-    """
-    raw = extract(source)
-    funnel = transform(raw, config,  drop_review_in_process=drop_review_in_process)
-    return funnel
+def run(df: pl.DataFrame, *, config: dict) -> pl.DataFrame:
+    """Transform a Polars DataFrame of candidate applications into a funnel DataFrame."""
+    return transform(df, config)
