@@ -350,8 +350,8 @@ def load(dfs: dict, config: PipelineConfig) -> None:
     log.info("  output : applications.parquet + .csv  (%d rows)", apps_df.height)
 
     oa_df = dfs["offer_accepts"].collect()
-    oa_df.write_parquet(config["OUTPUT_APPS_OFFER_ACCEPTS_PAR"], compression="zstd")
-    log.info("  output : applications_offer_accepts.parquet  (%d rows)", oa_df.height)
+    oa_df.write_parquet(config["OUTPUT_OFFER_ACCEPTS_PAR"], compression="zstd")
+    log.info("  output : offer_accepts.parquet  (%d rows)", oa_df.height)
 
     funnel_df = dfs["funnel"].collect()
     funnel_df.write_parquet(config["OUTPUT_FUNNEL_PAR"])
