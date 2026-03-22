@@ -1,11 +1,9 @@
-# src/pipelines/apps.py  ·  Applications ETL / cleansing
+# src/app.py  ·  Applications ETL / cleansing
 
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
 from datetime import date
-from time import perf_counter
 from typing import Any, Final
 
 import polars as pl
@@ -32,7 +30,7 @@ PipelineConfig = dict[str, Any]
 
 
 # ═════════════════════════════════════════════
-# COLUMN RENAME MAPS
+# COLUMN RENAME MAP
 # ═════════════════════════════════════════════
 
 APP_RENAME_MAP: Final[dict[str, str]] = {
@@ -82,6 +80,11 @@ DATE_COLS: Final[tuple[str, ...]] = (
     "candidate_start_date", "target_hire_date",
 )
 
+VALID_GRADES: Final[list[str]] = [
+    "Level 1", "Level 2", "Level 3", "Level 4",
+    "Level 5", "Level 6", "Level 7", "Level 8",
+]
+
 RAW_COLS_SNAKE: Final[list[str]] = [
     "candidate_id", "candidate_name",
     "job_requisition_id", "job_requisition", "recruiting_instruction",
@@ -100,7 +103,7 @@ ENGINEERED_COLS: Final[list[str]] = [
     "candidate_recruiting_status_orig",
     "disposition_reason_orig",
     "recruiter_completed_offer_id",
-    "last_stage_number"
+    "last_stage_number",
 ]
 
 
@@ -146,15 +149,6 @@ _APPLICATION_IN_PROCESS: Final[str] = "application in process"
 # ═════════════════════════════════════════════
 # UTILITIES
 # ═════════════════════════════════════════════
-
-@contextmanager
-def stage_timer(label: str):
-    _t0 = perf_counter()
-    try:
-        yield
-    finally:
-        log.info("%s duration: %.2fs", label, perf_counter() - _t0)
-
 
 def _parse_date(col: str) -> pl.Expr:
     """Try common date string formats; returns pl.Date, null on failure."""
@@ -271,7 +265,7 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         "candidate_recruiting_status",
         "recruiting_agency",
         "source",
-        "disposition_reason"
+        "disposition_reason",
     ]
     return long.select([c for c in order_cols if c in long.columns])
 
@@ -296,6 +290,11 @@ def extract(config: PipelineConfig) -> dict:
         "app_cutoff": app_cutoff,
         "run_date": run_date,
     }
+
+
+# ═════════════════════════════════════════════
+# RESCIND CORRECTION
+# ═════════════════════════════════════════════
 
 def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
     """Correct stage and disposition for rescinded offers."""
@@ -329,33 +328,31 @@ def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
           .alias("disposition_reason"),
     ])
 
+
 # ═════════════════════════════════════════════
 # TRANSFORM
 # ═════════════════════════════════════════════
-
-_VALID_GRADES: Final[list[str]] = [
-    "Level 1", "Level 2", "Level 3", "Level 4",
-    "Level 5", "Level 6", "Level 7", "Level 8",
-]
-
 
 def transform(raw: dict, config: PipelineConfig) -> dict:
     lf: pl.LazyFrame = raw["app_lf"]
     app_cutoff: date = raw["app_cutoff"]
 
-    # Schema of the raw CSV (cheap metadata read; used for pre-join guards)
     schema = set(lf.collect_schema().names())
+
+    # Fill null source before joins (prevents NULL key fan-out)
+    if "source" in schema:
+        lf = lf.with_columns(pl.col("source").fill_null("zzz_unknown"))
 
     # Parse date columns
     date_exprs = [_parse_date(c) for c in DATE_COLS if c in schema]
     if date_exprs:
         lf = lf.with_columns(date_exprs)
 
-    # Filter by cutoff and filter only Level 1 to Level 8
+    # Filter: 4-year lookback and Level 1–8 grades only
     if "job_application_date" in schema:
         lf = lf.filter(pl.col("job_application_date") >= app_cutoff)
     if "compensation_grade" in schema:
-        lf = lf.filter(pl.col("compensation_grade").is_in(_VALID_GRADES))
+        lf = lf.filter(pl.col("compensation_grade").is_in(VALID_GRADES))
 
     # Audit originals before corrections
     orig_cols = [c for c in ("last_recruiting_stage", "candidate_recruiting_status", "disposition_reason") if c in schema]
@@ -382,11 +379,11 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
     final_cols = [c for c in RAW_COLS_SNAKE + ENGINEERED_COLS if c in final_schema]
     lf = lf.select(final_cols)
 
-    # Offer-accept slice: Offer (6) used for on-time offer computation in power bi
-    offer_lf = lf.filter(pl.col("last_stage_number") >= OFFER_STAGE_MIN)
+    # Offer-accepts slice: candidates who accepted an offer
+    offer_accepts_lf = lf.filter(pl.col("candidate_recruiting_status") == "Offer Accepted")
 
-    with stage_timer("⏱  Transf Funnel •"):
-        funnel_lf = _transform_funnel(lf.collect(), config).lazy()
+    # Funnel transform (collect → transform → lazy)
+    funnel_lf = _transform_funnel(lf.collect(), config).lazy()
 
     return {
         "apps": lf,
@@ -400,15 +397,13 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
 # ═════════════════════════════════════════════
 
 def load(dfs: dict, config: PipelineConfig) -> None:
-    with stage_timer("⏱  Load apps •"):
-        apps_df = dfs["apps"].collect()
-        apps_df.write_parquet(config["OUTPUT_APPS_PAR"], compression="zstd")
+    apps_df = dfs["apps"].collect()
+    apps_df.write_parquet(config["OUTPUT_APPS_PAR"], compression="zstd")
+    apps_df.write_csv(config["OUTPUT_APPS_CSV"])
 
-    with stage_timer("⏱  Load offer accepts •"):
-        dfs["offer_accepts"].collect().write_parquet(config["OUTPUT_APPS_OFFER_ACCEPTS_PAR"], compression="zstd")
+    dfs["offer_accepts"].collect().write_parquet(config["OUTPUT_APPS_OFFER_ACCEPTS_PAR"], compression="zstd")
 
-    with stage_timer("⏱  Load funnel •"):
-        dfs["funnel"].collect().write_parquet(config["OUTPUT_FUNNEL_PAR"])
+    dfs["funnel"].collect().write_parquet(config["OUTPUT_FUNNEL_PAR"])
 
 
 # ═════════════════════════════════════════════
@@ -418,18 +413,12 @@ def load(dfs: dict, config: PipelineConfig) -> None:
 def run_app(config: PipelineConfig) -> dict:
     """Orchestrate full ETL for applications."""
     log.info("🚀 App ETL started...")
-    _t0 = perf_counter()
 
-    with stage_timer("⏱  Extract •"):
-        ext = extract(config)
+    ext = extract(config)
+    dfs = transform(ext, config)
+    load(dfs, config)
 
-    with stage_timer("⏱  Transform (overall) •"):
-        dfs = transform(ext, config)
-
-    with stage_timer("⏱  Load •"):
-        load(dfs, config)
-
-    log.info("✅ App ETL completed • duration : %.2fs", perf_counter() - _t0)
+    log.info("✅ App ETL completed")
     log.info("────────────────────────────────────")
 
     return dfs
