@@ -234,7 +234,11 @@ def transform(
     )
 
     # ── Step 3: prospect + review → top-of-funnel bridge ───────────────────
-    prospect_review_df = pl.concat([prospect_df, review_df], how="diagonal")
+    # All rows in this bridge represent prospects (stage 0), regardless of
+    # their original last_stage_number.
+    prospect_review_df = pl.concat([prospect_df, review_df], how="diagonal").with_columns(
+        pl.lit(PROSPECT_STAGE_NUMBER, dtype=pl.Int16).alias("last_stage_number")
+    )
     log.info(
         "prospect_review_df: %d rows  (prospect=%d  review=%d)",
         prospect_review_df.height, prospect_df.height, review_df.height,
