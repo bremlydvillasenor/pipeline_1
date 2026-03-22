@@ -39,15 +39,14 @@ def load_config(config_name="default.yaml", config_dir=None):
         "SCRUM_FILE": data_root / cfg["historical_data_root"] / cfg["scrum_file"],
 
         "OUTPUT_JOBREQS_OPENDMT_CSV": data_root / cfg["processed_data_root"] / cfg["output_jobreqs_open_dmt"],
-        "OUTPUT_JOBREQS_CSV": data_root / cfg["processed_data_root"] / cfg["output_jobreqs_csv"],
         "OUTPUT_JOBREQS_PAR": data_root / cfg["processed_data_root"] / cfg["output_jobreqs_par"],
 
-        "OUTPUT_HIRES_CSV": data_root / cfg["processed_data_root"] / cfg["output_hires_csv"],
         "OUTPUT_HIRES_PAR": data_root / cfg["processed_data_root"] / cfg["output_hires_par"],
         "OUTPUT_HIRESDB_PAR": data_root / cfg["historical_data_root"] / cfg["output_hiresdb_par"],
 
         "OUTPUT_APPS_CSV": data_root / cfg["processed_data_root"] / cfg["output_apps_csv"],
         "OUTPUT_APPS_PAR": data_root / cfg["processed_data_root"] / cfg["output_apps_par"],
+        "OUTPUT_APPS_OFFER_ACCEPTS_PAR": data_root / cfg["processed_data_root"] / cfg["output_apps_offer_accepts_par"],
         "OUTPUT_FUNNEL_PAR": data_root / cfg["processed_data_root"] / cfg["output_funnel_par"],
 
         "OUTPUT_REFERRALS_PARQUET": data_root / cfg["processed_data_root"] / cfg["output_referrals_par"],
