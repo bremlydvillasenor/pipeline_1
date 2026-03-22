@@ -10,7 +10,7 @@ from typing import Any, Final
 
 import polars as pl
 
-from .utils.helpers import latest_file
+from .utils import latest_file, extract_date_from_filename
 
 
 # ═════════════════════════════════════════════
@@ -127,6 +127,7 @@ FUNNEL_STAGE_LABELS: Final[dict[int, str]] = {
     2: "Screen",
     3: "Assessment",
     4: "Interview",
+    5: "Reference Check",
     6: "Offer",
     7: "Background Check",
     8: "Ready for Hire",
@@ -178,22 +179,7 @@ def _check_funnel_schema(df: pl.DataFrame) -> None:
 
 
 def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
-    """
-    Transform a Polars DataFrame of candidate application rows into funnel rows.
 
-    Rules
-    -----
-    - Input must be a Polars DataFrame containing all FUNNEL_REQUIRED_COLS.
-    - Stage coercion: 5 → 4 (Reference Check maps to Interview).
-    - job_application_date is truncated to month-start.
-    - Candidates with status 'Application in Process' are exploded only for
-      stages BEFORE last_stage_number (they have not completed that stage yet).
-      A candidate in stage 1 with this status produces zero rows and is absent
-      from the output entirely.
-    - All other candidates are expanded to one row per stage reached (1,2,3,4,6,7,8).
-    - Only the last stage row keeps the true status / disposition;
-      all earlier stage rows get status='Passed' and null disposition fields.
-    """
     if not isinstance(df, pl.DataFrame):
         raise TypeError(f"Expected a Polars DataFrame, got {type(df).__name__}")
 
@@ -273,19 +259,6 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         .alias("disposition_reason"),
     )
 
-    # Helper flags
-    status_norm = pl.col("candidate_recruiting_status").str.strip_chars().str.to_lowercase()
-    long = long.with_columns(
-        pl.when(status_norm == _APPLICATION_IN_PROCESS)
-        .then(pl.lit(1, dtype=pl.Int8))
-        .otherwise(pl.lit(0, dtype=pl.Int8))
-        .alias("in_process_count"),
-        pl.when(status_norm != _APPLICATION_IN_PROCESS)
-        .then(pl.lit(1, dtype=pl.Int8))
-        .otherwise(pl.lit(0, dtype=pl.Int8))
-        .alias("completed_count"),
-    )
-
     # Final column order (only those present)
     order_cols = [
         "job_requisition_id",
@@ -298,9 +271,7 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         "candidate_recruiting_status",
         "recruiting_agency",
         "source",
-        "disposition_reason",
-        "in_process_count",
-        "completed_count",
+        "disposition_reason"
     ]
     return long.select([c for c in order_cols if c in long.columns])
 
@@ -325,11 +296,6 @@ def extract(config: PipelineConfig) -> dict:
         "app_cutoff": app_cutoff,
         "run_date": run_date,
     }
-
-
-# ═════════════════════════════════════════════
-# TRANSFORM
-# ═════════════════════════════════════════════
 
 def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
     """Correct stage and disposition for rescinded offers."""
@@ -363,6 +329,9 @@ def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
           .alias("disposition_reason"),
     ])
 
+# ═════════════════════════════════════════════
+# TRANSFORM
+# ═════════════════════════════════════════════
 
 _VALID_GRADES: Final[list[str]] = [
     "Level 1", "Level 2", "Level 3", "Level 4",
@@ -382,7 +351,7 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
     if date_exprs:
         lf = lf.with_columns(date_exprs)
 
-    # Filter by cutoff and keep only Level 1–8
+    # Filter by cutoff and filter only Level 1 to Level 8
     if "job_application_date" in schema:
         lf = lf.filter(pl.col("job_application_date") >= app_cutoff)
     if "compensation_grade" in schema:
@@ -413,8 +382,8 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
     final_cols = [c for c in RAW_COLS_SNAKE + ENGINEERED_COLS if c in final_schema]
     lf = lf.select(final_cols)
 
-    # Offer-accepts slice: candidates who accepted an offer
-    offer_accepts_lf = lf.filter(pl.col("candidate_recruiting_status") == "Offer Accepted")
+    # Offer-accept slice: Offer (6) used for on-time offer computation in power bi
+    offer_lf = lf.filter(pl.col("last_stage_number") >= OFFER_STAGE_MIN)
 
     with stage_timer("⏱  Transf Funnel •"):
         funnel_lf = _transform_funnel(lf.collect(), config).lazy()
@@ -433,7 +402,6 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
 def load(dfs: dict, config: PipelineConfig) -> None:
     with stage_timer("⏱  Load apps •"):
         apps_df = dfs["apps"].collect()
-        apps_df.write_csv(config["OUTPUT_APPS_CSV"])
         apps_df.write_parquet(config["OUTPUT_APPS_PAR"], compression="zstd")
 
     with stage_timer("⏱  Load offer accepts •"):
