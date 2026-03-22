@@ -1,4 +1,4 @@
-# referral.py  ·  Referral Applications ETL
+# referral.py  ·  Referral ETL
 # Sources:
 #   1. Prospect Excel        – pre-funnel prospect stage rows
 #   2. Funnel parquet        – produced by app.py; ERP / Referral source rows only
@@ -16,11 +16,9 @@ from typing import Any, Dict, Final, Tuple
 
 import polars as pl
 
-from .utils.helpers import latest_file
+from _utils import latest_file
 
-
-__all__ = ["run_referral_pipeline"]
-
+__all__ = ["run_referral"]
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING
@@ -31,7 +29,6 @@ logging.basicConfig(
     format="%(asctime)s ▸ %(levelname)-8s ▸ %(name)s ▸ %(message)s",
 )
 log = logging.getLogger(__name__)
-
 
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -65,7 +62,6 @@ FUNNEL_COLS: Final[list[str]] = [
     "added_date",
     "source",
     "disposition_reason",
-    "consolidated_disposition",
     "candidate_recruiting_status",
     "last_stage_number",
 ]
@@ -79,7 +75,6 @@ REFERRAL_SCHEMA: Final[Dict[str, pl.DataType]] = {
     "added_date":                  pl.Date,
     "source":                      pl.Utf8,
     "disposition_reason":          pl.Utf8,
-    "consolidated_disposition":    pl.Utf8,
     "candidate_recruiting_status": pl.Utf8,
     "last_stage_number":           pl.Int16,
 }
