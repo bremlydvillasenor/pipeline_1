@@ -187,23 +187,7 @@ def _check_funnel_schema(df: pl.DataFrame) -> None:
 
 
 def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
-    """
-    Transform a Polars DataFrame of candidate application rows into funnel rows.
 
-    Rules
-    -----
-    - Input must be a Polars DataFrame containing all FUNNEL_REQUIRED_COLS.
-    - Stage coercions: 5 → 4, 7 → 6.
-    - job_application_date is truncated to month-start.
-    - Candidates with status 'Application in Process' are exploded only for
-      stages BEFORE last_stage_number (they have not completed that stage yet).
-      A candidate in stage 1 with this status produces zero rows and is absent
-      from the output entirely.
-    - All other candidates are expanded to one row per stage reached (1,2,3,4,6,8).
-    - Only the last stage row keeps the true status / disposition;
-      all earlier stage rows get status='Passed' and null disposition fields.
-    - Disposition mapping is left-joined from config['SCRUM_FILE'].
-    """
     if not isinstance(df, pl.DataFrame):
         raise TypeError(f"Expected a Polars DataFrame, got {type(df).__name__}")
 
@@ -352,17 +336,9 @@ def extract(config: PipelineConfig) -> dict:
 
     return {
         "app_lf": app_lf,
-        "dispo_map_lf": dispo_map_lf,
-        "source_map_lf": source_map_lf,
-        "jobreq_lf": jobreq_lf,
         "app_cutoff": app_cutoff,
         "refresh_date": refresh_date,
     }
-
-
-# ═════════════════════════════════════════════
-# TRANSFORM
-# ═════════════════════════════════════════════
 
 def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
     """Correct stage and disposition for rescinded offers."""
@@ -396,12 +372,12 @@ def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
           .alias("disposition_reason"),
     ])
 
+# ═════════════════════════════════════════════
+# TRANSFORM
+# ═════════════════════════════════════════════
 
 def transform(raw: dict, config: PipelineConfig) -> dict:
     lf: pl.LazyFrame = raw["app_lf"]
-    dispo_map_lf: pl.LazyFrame = raw["dispo_map_lf"]
-    source_map_lf: pl.LazyFrame = raw["source_map_lf"]
-    jobreq_lf: pl.LazyFrame = raw["jobreq_lf"]
     app_cutoff: date = raw["app_cutoff"]
 
     # Schema of the raw CSV (cheap metadata read; used for pre-join guards)
