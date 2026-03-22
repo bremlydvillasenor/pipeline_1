@@ -6,9 +6,7 @@ Processes daily application CSV exports from Workday into two output datasets:
 
 1. **`applications.parquet`** — One row per candidate-application, enriched and cleaned
 2. **`app_funnel.parquet`** — One row per candidate-per-stage reached (exploded view for funnel analytics)
-
-A third output, **`applications_offer.parquet`**, is a filtered slice of applications
-for candidates who reached the Offer stage or beyond.
+3. **`applications_offer_accepts.parquet`** — One row per offer data, enrich with recruiter who deliver offer 
 
 ```
 Daily Application CSV (skip 16 rows)
@@ -16,25 +14,18 @@ Daily Application CSV (skip 16 rows)
             ▼
         EXTRACT
     ├── App CSV         → LazyFrame (renamed columns)
-    ├── Disposition map → LazyFrame (from ta_scrum_file.xlsx)
-    ├── Source map      → LazyFrame (from ta_scrum_file.xlsx)
-    └── Jobreq parquet  → LazyFrame (for function/sub_function/complexity enrichment)
             │
             ▼
         TRANSFORM
-    ├── Fill nulls, parse dates, filter cutoff + Level 9
+    ├── Fill nulls, parse dates, filter cutoff + Level 1 to Level 8
     ├── Audit originals (snapshot before corrections)
     ├── Apply rescind corrections
     ├── Derive stage numbers
-    ├── Enrich: disposition map join
-    ├── Enrich: jobreq join (function, sub_function, complexity, RAG target)
-    ├── Enrich: source map join (consolidated_channel, channel_sort, internal_external)
     ├── Derive: recruiter_completed_offer_id (digits-only)
-    ├── Derive: on_time_offer_accept (vs RAG target month-end)
     └── Reorder final columns
             │
             ├── apps LazyFrame ──────────────────────────► applications.parquet / .csv
-            ├── offer_stage LazyFrame (stage ≥ 6) ──────► applications_offer.parquet
+            ├── offer_accepts LazyFrame (candidate_recruiting_status = "Offer Accepted") ──────► applications_offer_accepts.parquet
             └── funnel LazyFrame (_transform_funnel) ───► app_funnel.parquet
 ```
 
@@ -50,9 +41,9 @@ STAGE_MAP = {
     "Screen":           2,
     "Assessment":       3,
     "Interview":        4,
-    "Reference Check":  5,   ← coerced to 4 in funnel
+    "Reference Check":  5,
     "Offer":            6,
-    "Background Check": 7,   ← coerced to 6 in funnel
+    "Background Check": 7,
     "Ready for Hire":   8,
 }
 ```
@@ -60,8 +51,7 @@ STAGE_MAP = {
 ### Funnel Valid Stages
 
 ```
-FUNNEL_VALID_STAGES = [1, 2, 3, 4, 6, 8]
-  (Stages 5 and 7 are coerced before funnel expansion)
+FUNNEL_VALID_STAGES = [1, 2, 3, 4, 6, 7, 8]
 ```
 
 ### Column Groups
@@ -75,11 +65,7 @@ DATE_COLS = [
 ENGINEERED_COLS = [
     last_recruiting_stage_orig, candidate_recruiting_status_orig,
     disposition_reason_orig, recruiter_completed_offer_id,
-    last_stage_number, consolidated_disposition, consolidated_disposition_2,
-    consolidated_channel, channel_sort, internal_external,
-    is_non_auto_dispo, is_candidate_driven_dispo,
-    function, sub_function, rag_target_offer_acceptance_date,
-    on_time_offer_accept, complexity,
+    last_stage_number
 ]
 ```
 
@@ -92,8 +78,8 @@ FUNCTION extract(config):
 
     # Determine refresh date and application lookback window
     status_path  ← latest_file(RAW_DATA_ROOT, ALL_STATUS_PATTERN)
-    refresh_date ← extract_date_from_filename(status_path)
-    app_cutoff   ← date(refresh_date.year - 4, month=1, day=1)
+    run_date ← current date
+    app_cutoff   ← date(run_date.year - 4, month=1, day=1)
         # Applications older than 4 years from refresh date are excluded
 
     # Load daily application CSV
@@ -103,23 +89,8 @@ FUNCTION extract(config):
                 .rename(APP_RENAME_MAP)
         # skip_rows=16: Workday CSV has 16 metadata header rows before data
 
-    # Load disposition mapping reference (from historical/ta_scrum_file.xlsx)
-    dispo_map_lf ← read_excel(SCRUM_FILE, sheet="disposition_mapping")
-                    .rename({ "Disposition Reason": "disposition_reason" })
-                    .lazy()
-
-    # Load source mapping reference (from historical/ta_scrum_file.xlsx)
-    source_map_lf ← read_excel(SCRUM_FILE, sheet="source_mapping",
-                        columns=["source","consolidated_channel","channel_sort","internal_external"])
-                    .lazy()
-
-    # Load job requisition enrichment data
-    jobreq_lf ← scan_parquet(OUTPUT_JOBREQS_PAR)
-    IF OUTPUT_JOBREQS_PAR does not exist → RAISE FileNotFoundError
-
     RETURN {
-        app_lf, dispo_map_lf, source_map_lf, jobreq_lf,
-        app_cutoff, refresh_date
+        app_lf, app_cutoff, run_date
     }
 ```
 
@@ -147,7 +118,7 @@ FOR EACH col IN DATE_COLS WHERE col IN schema:
 FILTER: job_application_date >= app_cutoff
 
 # Grade exclusion: Level 9 is always removed from applications
-FILTER: compensation_grade != "Level 9"
+FILTER: compensation_grade in "Level 1" to "Level 8" 
 ```
 
 ### 2b. Audit Snapshots (Pre-Correction)
@@ -202,24 +173,6 @@ last_stage_number ← STAGE_MAP.replace(last_recruiting_stage, default=NULL).cas
     # Unmapped stage names → NULL
 ```
 
-### 2e. Enrichment Joins
-
-```
-# 1. Disposition enrichment (LEFT JOIN — adds consolidated_disposition, is_dispo, etc.)
-IF disposition_reason in both lf and dispo_map:
-    lf ← lf LEFT JOIN dispo_map_lf ON disposition_reason
-
-# 2. Job requisition enrichment (LEFT JOIN — adds function, sub_function, complexity, RAG target)
-jr_cols = { job_requisition_id, function, sub_function,
-            rag_target_offer_acceptance_date, complexity }
-IF all jr_cols present in jobreq_lf:
-    lf ← lf LEFT JOIN jobreq_lf.select(jr_cols) ON job_requisition_id
-
-# 3. Source enrichment (LEFT JOIN — adds consolidated_channel, channel_sort, internal_external)
-IF source in both lf and source_map:
-    lf ← lf LEFT JOIN source_map_lf ON source
-```
-
 ### 2f. Derived Fields (Post-Join)
 
 ```
@@ -229,12 +182,6 @@ recruiter_completed_offer_id ←
     IF cleaned == "" → "zzz_blank"
     ELSE             → cleaned
 
-# On-time offer acceptance: compare offer date against RAG target month-end
-IF offer_accepted_date AND rag_target_offer_acceptance_date exist:
-    rag_month_end ← rag_target_offer_acceptance_date.month_end()
-    on_time_offer_accept ←
-        IF offer_accepted_date <= rag_month_end → "Yes"
-        ELSE                                    → ""
 ```
 
 ### 2g. Final Column Selection
@@ -248,8 +195,8 @@ lf ← lf.select(final_cols)
 ### 2h. Derived Sub-Frames
 
 ```
-# Offer-stage slice: candidates who reached Offer or later
-offer_lf ← lf.filter(last_stage_number >= 6)
+# Offer-Accepts: candidates who have Accepted Offer
+offer_lf ← lf.filter(candidate_recruiting_status = "Offer Accepted")
 
 # Funnel transform (collect → transform → lazy)
 funnel_lf ← _transform_funnel(lf.collect(), config).lazy()
@@ -273,15 +220,6 @@ FUNCTION _transform_funnel(df, config):
         # Raises ValueError if any FUNNEL_REQUIRED_COLS are missing
 
     df ← df.select(FUNNEL_REQUIRED_COLS)   # Keep only required columns
-```
-
-### 3b. Stage Coercions
-
-```
-last_stage_number ←
-    IF last_stage_number == 5 → 4   (Reference Check → Interview)
-    IF last_stage_number == 7 → 6   (Background Check → Offer)
-    ELSE                      → last_stage_number (cast to Int16)
 ```
 
 ### 3c. Date Truncation
@@ -344,31 +282,6 @@ disposition_reason ←
     IF is_last → keep original disposition
     ELSE       → NULL
 
-on_time_offer_accept ←
-    IF is_last → keep original value
-    ELSE       → NULL
-```
-
-### 3h. Helper Count Flags
-
-```
-in_process_count ←
-    IF candidate_recruiting_status (normalised) == "application in process" → 1
-    ELSE → 0
-
-completed_count ←
-    IF candidate_recruiting_status (normalised) != "application in process" → 1
-    ELSE → 0
-```
-
-### 3i. Disposition Map Join
-
-```
-dispo_map ← read_excel(config["SCRUM_FILE"], sheet="disposition_mapping")
-IF "disposition_reason" in dispo_map columns:
-    long ← long LEFT JOIN dispo_map ON disposition_reason
-        # Adds: consolidated_disposition, consolidated_disposition_2,
-        #        is_dispo, is_non_auto_dispo, is_candidate_driven_dispo
 ```
 
 ### 3j. Final Column Ordering
@@ -389,7 +302,7 @@ FUNCTION load(dfs, config):
     apps_df.write_csv(OUTPUT_APPS_CSV)
     apps_df.write_parquet(OUTPUT_APPS_PAR, compression="zstd")
 
-    # Offer-stage slice — candidates at Offer or beyond
+    # Offer-accepts slice — candidates who Offer Accepts
     dfs["offer_stage"].collect()
         .write_parquet(OUTPUT_APPS_OFFER_PAR, compression="zstd")
 
@@ -424,20 +337,15 @@ FUNCTION run_app(config):
 |---|---|---|
 | Date parsing failure | Value doesn't match any format | Field becomes NULL (non-strict, no error) |
 | Missing source | `source` IS NULL | Filled with `"zzz_unknown"` before join |
-| Level 9 exclusion | `compensation_grade == "Level 9"` | Row dropped — always excluded |
+| Level 1 to Level 8 filter | `compensation_grade in "Level 1" to "Level 8"` |
 | Application scope | `job_application_date < 4-year cutoff` | Row dropped |
 | Rescind correction | Rescinded + NULL hired + RFH stage + Offer Accepted status | Stage rolled back to "Offer"; disposition set to "Offer Accepted to Rescinded" |
 | Stage rollback (RFH + disposition) | Stage is "Ready for Hire" AND disposition is not null | Stage rolled back to "Offer" |
 | Unmapped stage name | Stage name not in STAGE_MAP | `last_stage_number` = NULL |
-| Stage coercion (funnel) | `last_stage_number == 5` | Coerced to 4 (Interview) |
-| Stage coercion (funnel) | `last_stage_number == 7` | Coerced to 6 (Offer) |
 | In-process funnel rows | `candidate_recruiting_status == "Application in Process"` | Explode only stages **before** current; zero rows if at stage 1 |
 | Last stage vs earlier rows | `stage_number == last_stage_number` | Keeps true status/disposition; earlier rows → "Passed" + NULL disposition |
-| Missing jobreq parquet | `OUTPUT_JOBREQS_PAR` not found | Hard fail — `FileNotFoundError` raised in extract |
 | Missing enrichment columns | Column absent from join result | Silently excluded from final column selection |
 | Empty recruiter ID | Digits-only extraction yields `""` | Replaced with `"zzz_blank"` |
-| On-time offer | `offer_accepted_date <= RAG month-end` | `on_time_offer_accept = "Yes"` |
-| Late or missing offer | Condition not met or dates absent | `on_time_offer_accept = ""` |
 
 ---
 
@@ -524,9 +432,9 @@ One row per candidate per funnel stage reached. Derived from `applications`.
 | `completed_count` | Int8 | 1 if completed this stage |
 | `on_time_offer_accept` | Utf8 | NULL for non-last rows |
 
-### `applications_offer.parquet`
+### `applications_offer_accepts.parquet`
 
-Filtered slice of `applications` where `last_stage_number >= 6` (Offer or beyond).
+Filtered slice of `applications` where candidate_recruiting_status = "Offer Accepted".
 Schema is identical to `applications.parquet`.
 
 ---
@@ -539,24 +447,18 @@ config["RAW_DATA_ROOT"]
     ├── DAILY_APP_PATTERN CSV  (skip 16 rows)
     │       rename columns → parse dates
     │       filter: job_application_date >= 4-year cutoff
-    │       filter: compensation_grade != "Level 9"
+    │       filter: compensation_grade = "Level 1" to "Level 8"
     │       snapshot originals (stage, status, disposition)
     │       apply rescind correction
-    │       derive: last_stage_number
-    │       ├── LEFT JOIN disposition_map  → consolidated_disposition, is_dispo, etc.
-    │       ├── LEFT JOIN jobreq           → function, sub_function, complexity, RAG target
-    │       └── LEFT JOIN source_map       → consolidated_channel, channel_sort, internal_external
     │       derive: recruiter_completed_offer_id
-    │       derive: on_time_offer_accept
     │       select final column order
     │
     ├── applications.csv / applications.parquet  ←── full apps LazyFrame
     │
-    ├── applications_offer.parquet               ←── filter(last_stage_number >= 6)
+    ├── applications_offer_accepts.parquet               ←── filter(candidate_recruiting_status = "Offer Accepted")
     │
     └── app_funnel.parquet                       ←── _transform_funnel(apps_df)
                 │
-                ├── coerce stages (5→4, 7→6)
                 ├── truncate job_application_date to month
                 ├── tag in-process candidates
                 ├── build per-row stage list
@@ -564,7 +466,5 @@ config["RAW_DATA_ROOT"]
                 │       completed  → stages UP TO AND INCLUDING current
                 ├── explode to one row per stage
                 ├── join FUNNEL_STAGE_MAP → stage label
-                ├── mask status/disposition (only last stage row keeps truth)
-                ├── add in_process_count / completed_count flags
-                └── LEFT JOIN disposition_map on disposition_reason
+
 ```
