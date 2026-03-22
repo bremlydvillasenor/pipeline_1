@@ -1,4 +1,4 @@
-# referral.py — Referral Applications ETL
+# referral.py — Referral ETL
 
 ## Overview
 
