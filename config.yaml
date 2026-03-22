@@ -29,3 +29,5 @@ output_referrals_funnel_par: "referrals_funnel.parquet"
 output_mheadcount_par: "monthly_headcount.parquet"
 
 reqs_years_scope: 3
+
+log_dir: "logs"

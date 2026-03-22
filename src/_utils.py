@@ -1,7 +1,16 @@
 """
-common/utils.py  ──  Re-usable helpers for all ETL pipelines
--------------------------------------------------------------------
-Everything lives in ETLUtils; thin aliases are exported for convenience.
+src/_utils.py  ─  Shared pipeline utilities
+─────────────────────────────────────────────────────────────
+Provides
+  setup_logging            – configure root logger (console + daily file)
+  latest_file              – newest file matching a glob pattern
+  extract_date_from_filename – pull YYYY-MM-DD from a filename
+  to_snake                 – normalise a column name to snake_case
+  build_rename_map         – de-dup snake_case rename dict for a column list
+  read_excel_with_header   – read Excel, promote first row as header
+  ensure_schema            – select / cast / fill-null to match a schema dict
+  write_parquet_atomic     – write Parquet via tmp-then-replace
+  run_backup               – copy raw + processed into a dated backup folder
 """
 
 from __future__ import annotations
@@ -9,242 +18,221 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any
 
-import numpy as np
-import pandas as pd
+import polars as pl
 
-###############################################################################
-# Logging (arrow-style format already set by root)                            #
-###############################################################################
-logger = logging.getLogger("ETLUtils")
+logger = logging.getLogger(__name__)
 
-###############################################################################
-# Public re-exports (so old imports won’t break)                              #
-###############################################################################
 __all__ = [
-    # convenience aliases
-    "sanitize_id",
+    "setup_logging",
     "latest_file",
     "extract_date_from_filename",
-    "add_date_slices",
+    "to_snake",
+    "build_rename_map",
+    "read_excel_with_header",
+    "ensure_schema",
+    "write_parquet_atomic",
     "run_backup",
-    # full class
-    "ETLUtils",
 ]
 
 
-###############################################################################
-# ETLUtils – now contains ALL shared helpers                                  #
-###############################################################################
-class ETLUtils:
+# ─────────────────────────────────────────────────────────────
+# LOGGING SETUP
+# ─────────────────────────────────────────────────────────────
+
+def setup_logging(log_dir: Path | str | None = None) -> None:
     """
-    Static helpers for lightweight, in-process ETL work.
-    All methods return **new** DataFrames and never mutate inputs.
+    Configure the root logger with a StreamHandler and (optionally) a
+    daily rotating FileHandler.  Call once from the pipeline entry point
+    before any ETL stage runs.
     """
+    fmt     = "%(asctime)s  %(levelname)-8s  %(name)-22s  %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
 
-    # ──────────────────────────────
-    # 0.  Generic file / string utils
-    # ──────────────────────────────
-    @staticmethod
-    def build_ee_pos_id(df: pd.DataFrame) -> pd.Series:
-        emp = sanitize_id(df["Employee ID"])
-        pos = df["Position ID"].astype(str)
-        return emp + pos
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
 
-    @staticmethod
-    def sanitize_id(series: pd.Series, *, strip_leading_zeros: bool = False) -> pd.Series:
-        """Pure string ID (strip '.0', trim, optional zero-lstrip)."""
-        out = series.astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
-        if strip_leading_zeros:
-            out = out.str.lstrip("0")
-        return out
+    if log_dir is not None:
+        log_dir = Path(log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"pipeline_{datetime.today().strftime('%Y-%m-%d')}.log"
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+        handlers.append(fh)
+        logger.info("log file  : %s", log_file)
 
-    @staticmethod
-    def latest_file(directory: Path, pattern: str) -> Path:
-        """Newest file (by mtime) matching *pattern* inside *directory*."""
-        files = sorted(directory.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not files:
-            raise FileNotFoundError(f"No files match {pattern!r} in {directory}")
-        return files[0]
-
-    @staticmethod
-    def extract_date_from_filename(
-        path: str | Path,
-        *,
-        regex: str = r"\d{4}-\d{2}-\d{2}",
-        date_format: str = "%Y-%m-%d",
-    ) -> pd.Timestamp:
-        """Pull first YYYY-MM-DD in *path.name* and return as Timestamp."""
-        fname = Path(path).name
-        m = re.search(regex, fname)
-        if not m:
-            raise ValueError(f"No date like {regex!r} in {fname!r}")
-        return pd.to_datetime(m.group(0), format=date_format, errors="raise").normalize()
-
-    @staticmethod
-    def add_date_slices(
-        df: pd.DataFrame,
-        *,
-        date_col: str,
-        prefix: str = "",
-    ) -> pd.DataFrame:
-        """
-        Append *_year / *_mmmyy / *_yyyymm columns derived from *date_col*.
-
-        Pass the *prefix* you want, e.g.
-        • jobreq.py →  prefix="thd_"
-        • hire.py   →  prefix="start_"
-        """
-        out = df.copy()
-        out[f"{prefix}year"] = out[date_col].dt.year
-        out[f"{prefix}month_year"] = out[date_col].dt.strftime("%b %Y")
-        out[f"{prefix}yyyymm"] = out[date_col].dt.strftime("%Y%m")
-        return out
+    logging.basicConfig(
+        level=logging.INFO,
+        format=fmt,
+        datefmt=datefmt,
+        handlers=handlers,
+        force=True,
+    )
 
 
-    @staticmethod
-    def apply_filters(df: pd.DataFrame, conditions: dict[str, Any]) -> pd.DataFrame:
+# ─────────────────────────────────────────────────────────────
+# FILE HELPERS
+# ─────────────────────────────────────────────────────────────
 
-        if not conditions:
-            return df.copy()
-
-        mask = pd.Series(True, index=df.index)
-
-        for col, cond in conditions.items():
-            if col not in df.columns:
-                logger.warning("Filter skipped – column missing: %s", col)
-                continue
-
-            if callable(cond):
-                mask &= df[col].apply(cond)
-            elif isinstance(cond, (list, tuple, set, np.ndarray, pd.Series)):
-                mask &= df[col].isin(cond)
-            else:
-                mask &= df[col].eq(cond)
-
-        logger.info("Applied filters: kept %d / %d rows", mask.sum(), len(df))
-        return df[mask].copy()
-
-    # ──────────────────────────────
-    # 1.  FILE READERS (unchanged)   …
-    #    ‣ read_excel / read_csv / read_json
-    # ──────────────────────────────
-    @staticmethod
-    def read_excel(
-        file_path: str | Path,
-        *,
-        sheet_name: str | int | None = 0,
-        usecols: str | list[str] | None = None,
-        filter_condition: dict[str, Any] | None = None,
-        skiprows: int | list[int] | None = None,
-        nrows: int | None = None,
-        dtype: dict[str, str] | None = None,
-        **kwargs,
-    ) -> pd.DataFrame:
-        try:
-            df = pd.read_excel(
-                file_path,
-                sheet_name=sheet_name,
-                usecols=usecols,
-                skiprows=skiprows,
-                nrows=nrows,
-                dtype=dtype,
-                engine=kwargs.pop("engine", None),
-                **kwargs,
-            )
-            logger.info("Read Excel (%s): %s  (rows=%d)", sheet_name, Path(file_path).name, len(df))
-            return ETLUtils.apply_filters(df, filter_condition) if filter_condition else df
-        except Exception:
-            logger.exception("Failed reading Excel %s", file_path)
-            raise
-
-    @staticmethod
-    def read_csv(
-        file_path: str | Path,
-        *,
-        usecols: list[str] | None = None,
-        filter_condition: dict[str, Any] | None = None,
-        dtype: dict[str, str] | None = None,
-        encoding: str = "utf-8",
-        sep: str = ",",
-        **kwargs,
-    ) -> pd.DataFrame:
-        try:
-            df = pd.read_csv(
-                file_path,
-                usecols=usecols,
-                dtype=dtype,
-                encoding=encoding,
-                sep=sep,
-                **kwargs,
-            )
-            logger.info("Read CSV: %s  (rows=%d)", Path(file_path).name, len(df))
-            return ETLUtils.apply_filters(df, filter_condition) if filter_condition else df
-        except Exception:
-            logger.exception("Failed reading CSV %s", file_path)
-            raise
-
-    @staticmethod
-    def read_json(
-        file_path: str | Path,
-        *,
-        filter_condition: dict[str, Any] | None = None,
-        **kwargs,
-    ) -> pd.DataFrame:
-        try:
-            df = pd.read_json(file_path, **kwargs)
-            logger.info("Read JSON: %s  (rows=%d)", Path(file_path).name, len(df))
-            return ETLUtils.apply_filters(df, filter_condition) if filter_condition else df
-        except Exception:
-            logger.exception("Failed reading JSON %s", file_path)
-            raise
-
-    # ──────────────────────────────
-    # 2.  TRANSFORMERS  (apply_filters, …)  – unchanged
-    # 3.  TYPE HELPERS  (convert_types, …)  – unchanged
-    # 4.  AGG / JOIN    – unchanged
-    # 5.  SAVE / QA     – unchanged
-    # ──────────────────────────────
-    # … (the rest of the previously-shared ETLUtils code stays intact) …
-
-    # ──────────────────────────────
-    # 6.  BACKUP
-    # ──────────────────────────────
-    @staticmethod
-    def run_backup() -> None:
-        """
-        Copy data/raw and data/processed into a date-stamped folder one level
-        above the project root (YYYY-MM-DD format). Overwrites if it exists.
-        """
-        today = datetime.today().strftime("%Y-%m-%d")
-        project_root = Path(__file__).resolve().parents[1]
-        backup_dest = project_root.parent / today
-
-        if backup_dest.exists():
-            shutil.rmtree(backup_dest)
-            logger.info("Overwriting existing backup: %s", backup_dest)
-
-        backup_dest.mkdir(parents=True)
-
-        for folder in ("raw", "processed"):
-            src = project_root / "data" / folder
-            if src.exists():
-                shutil.copytree(src, backup_dest / folder)
-                logger.info("Backed up %s → %s", src, backup_dest / folder)
-            else:
-                logger.warning("Backup source not found, skipped: %s", src)
-
-        logger.info("✅ Backup complete → %s", backup_dest)
+def latest_file(directory: Path | str, pattern: str) -> Path:
+    """Return the newest file (by mtime) matching *pattern* inside *directory*."""
+    files = sorted(Path(directory).glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        raise FileNotFoundError(f"No files match {pattern!r} in {directory}")
+    return files[0]
 
 
-###############################################################################
-# Aliases so old top-level imports still work                                 #
-###############################################################################
-sanitize_id = ETLUtils.sanitize_id
-latest_file = ETLUtils.latest_file
-extract_date_from_filename = ETLUtils.extract_date_from_filename
-add_date_slices = ETLUtils.add_date_slices
-run_backup = ETLUtils.run_backup
+def extract_date_from_filename(
+    path: str | Path,
+    *,
+    regex: str = r"\d{4}-\d{2}-\d{2}",
+    date_format: str = "%Y-%m-%d",
+) -> date:
+    """Pull first YYYY-MM-DD token from *path.name* and return as datetime.date."""
+    fname = Path(path).name
+    m = re.search(regex, fname)
+    if not m:
+        raise ValueError(f"No date matching {regex!r} in filename {fname!r}")
+    return datetime.strptime(m.group(0), date_format).date()
+
+
+# ─────────────────────────────────────────────────────────────
+# COLUMN NAME HELPERS
+# ─────────────────────────────────────────────────────────────
+
+def to_snake(name: str) -> str:
+    """Normalise a column name to lower_snake_case."""
+    s = str(name).strip().lower()
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", "_", s)
+    return re.sub(r"_+", "_", s).strip("_") or "col"
+
+
+def build_rename_map(columns: list[str]) -> dict[str, str]:
+    """
+    Return a {original: snake_case} rename dict for *columns*.
+    Duplicate snake names are suffixed _1, _2, …
+    """
+    counts: dict[str, int] = {}
+    result: dict[str, str] = {}
+    for col in columns:
+        snake = to_snake(col)
+        if snake in counts:
+            counts[snake] += 1
+            result[col] = f"{snake}_{counts[snake]}"
+        else:
+            counts[snake] = 0
+            result[col] = snake
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
+# EXCEL READER
+# ─────────────────────────────────────────────────────────────
+
+def read_excel_with_header(
+    path: Path | str,
+    *,
+    skip_rows: int = 0,
+    engine: str = "calamine",
+) -> pl.DataFrame:
+    """
+    Read an Excel file, skip *skip_rows* preamble rows, then promote the
+    next row as the column header.  Returns a DataFrame with the original
+    header strings as column names (no renaming applied here).
+    """
+    df = pl.read_excel(
+        path,
+        has_header=False,
+        read_options={"skip_rows": skip_rows},
+        engine=engine,
+    )
+    headers = [str(v) for v in df.row(0)]
+    return df.slice(1).rename(dict(zip(df.columns, headers)))
+
+
+# ─────────────────────────────────────────────────────────────
+# SCHEMA ENFORCEMENT
+# ─────────────────────────────────────────────────────────────
+
+def ensure_schema(
+    df: pl.DataFrame,
+    schema: dict[str, pl.DataType],
+    name: str = "",
+) -> pl.DataFrame:
+    """
+    Select and cast *df* to exactly match *schema*.
+    Columns missing from *df* are added as typed nulls.
+    *name* is used only in warning messages.
+    """
+    if df.height == 0:
+        return pl.DataFrame(schema=schema)
+
+    existing = set(df.columns)
+    missing  = [c for c in schema if c not in existing]
+    if missing:
+        label = f"{name}: " if name else ""
+        logger.warning("%smissing columns filled with null: %s", label, missing)
+
+    return df.select([
+        pl.lit(None).cast(dtype).alias(col)
+        if col in missing
+        else pl.col(col).cast(dtype, strict=False)
+        for col, dtype in schema.items()
+    ])
+
+
+# ─────────────────────────────────────────────────────────────
+# PARQUET WRITER
+# ─────────────────────────────────────────────────────────────
+
+def write_parquet_atomic(
+    df: pl.DataFrame,
+    target: Path,
+    *,
+    compression: str = "zstd",
+) -> None:
+    """
+    Write a Parquet file atomically: write to a .tmp file in the same
+    directory then replace the target on success.
+    """
+    if target.suffix != ".parquet":
+        raise ValueError(f"Target path must end with '.parquet', got: {target}")
+    tmp = target.with_name(target.name + ".tmp")
+    try:
+        df.write_parquet(tmp, compression=compression)
+        tmp.replace(target)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+# ─────────────────────────────────────────────────────────────
+# BACKUP
+# ─────────────────────────────────────────────────────────────
+
+def run_backup() -> None:
+    """
+    Copy data/raw and data/processed into a date-stamped folder one level
+    above the project root (YYYY-MM-DD).  Overwrites if already exists.
+    """
+    today        = datetime.today().strftime("%Y-%m-%d")
+    project_root = Path(__file__).resolve().parents[1]
+    backup_dest  = project_root.parent / today
+
+    if backup_dest.exists():
+        shutil.rmtree(backup_dest)
+        logger.info("  backup : overwriting existing %s", backup_dest)
+
+    backup_dest.mkdir(parents=True)
+
+    for folder in ("raw", "processed"):
+        src = project_root / "data" / folder
+        if src.exists():
+            shutil.copytree(src, backup_dest / folder)
+            logger.info("  backup : %s → %s", src.name, backup_dest / folder)
+        else:
+            logger.warning("  backup : source not found, skipped: %s", src)
+
+    logger.info("  backup : done → %s", backup_dest)
