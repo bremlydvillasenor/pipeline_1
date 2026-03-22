@@ -5,13 +5,12 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from datetime import date
-from pathlib import Path
 from time import perf_counter
 from typing import Any, Final
 
 import polars as pl
 
-from .utils.helpers import latest_file, extract_date_from_filename
+from .utils.helpers import latest_file
 
 
 # ═════════════════════════════════════════════
@@ -68,10 +67,6 @@ APP_RENAME_MAP: Final[dict[str, str]] = {
     "MBPS Teams":                          "mbps_teams",
 }
 
-DISPO_RENAME_MAP: Final[dict[str, str]] = {
-    "Disposition Reason": "disposition_reason",
-}
-
 
 # ═════════════════════════════════════════════
 # CONSTANTS
@@ -108,9 +103,6 @@ ENGINEERED_COLS: Final[list[str]] = [
     "last_stage_number"
 ]
 
-# Offer (6) through Ready for Hire (8)
-OFFER_STAGE_MIN: Final[int] = STAGE_MAP["Offer"]
-
 
 # ═════════════════════════════════════════════
 # FUNNEL CONSTANTS
@@ -123,14 +115,12 @@ FUNNEL_REQUIRED_COLS: Final[set[str]] = {
     "job_requisition_id",
     "recruiting_agency",
     "source",
-    "consolidated_channel",
-    "internal_external",
     "disposition_reason",
     "candidate_recruiting_status",
     "last_stage_number",
 }
 
-FUNNEL_VALID_STAGES: Final[list[int]] = [1, 2, 3, 4, 6, 8]
+FUNNEL_VALID_STAGES: Final[list[int]] = [1, 2, 3, 4, 6, 7, 8]
 
 FUNNEL_STAGE_LABELS: Final[dict[int, str]] = {
     1: "Review",
@@ -138,6 +128,7 @@ FUNNEL_STAGE_LABELS: Final[dict[int, str]] = {
     3: "Assessment",
     4: "Interview",
     6: "Offer",
+    7: "Background Check",
     8: "Ready for Hire",
 }
 
@@ -193,16 +184,15 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
     Rules
     -----
     - Input must be a Polars DataFrame containing all FUNNEL_REQUIRED_COLS.
-    - Stage coercions: 5 → 4, 7 → 6.
+    - Stage coercion: 5 → 4 (Reference Check maps to Interview).
     - job_application_date is truncated to month-start.
     - Candidates with status 'Application in Process' are exploded only for
       stages BEFORE last_stage_number (they have not completed that stage yet).
       A candidate in stage 1 with this status produces zero rows and is absent
       from the output entirely.
-    - All other candidates are expanded to one row per stage reached (1,2,3,4,6,8).
+    - All other candidates are expanded to one row per stage reached (1,2,3,4,6,7,8).
     - Only the last stage row keeps the true status / disposition;
       all earlier stage rows get status='Passed' and null disposition fields.
-    - Disposition mapping is left-joined from config['SCRUM_FILE'].
     """
     if not isinstance(df, pl.DataFrame):
         raise TypeError(f"Expected a Polars DataFrame, got {type(df).__name__}")
@@ -214,12 +204,10 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
 
     df = df.select([c for c in df.columns if c in FUNNEL_REQUIRED_COLS])
 
-    # Coerce last_stage_number; map 5→4, 7→6
+    # Coerce last_stage_number; map 5→4 (Reference Check → Interview)
     df = df.with_columns(
         pl.when(pl.col("last_stage_number").cast(pl.Int16, strict=False) == 5)
         .then(pl.lit(4, dtype=pl.Int16))
-        .when(pl.col("last_stage_number").cast(pl.Int16, strict=False) == 7)
-        .then(pl.lit(6, dtype=pl.Int16))
         .otherwise(pl.col("last_stage_number").cast(pl.Int16, strict=False))
         .alias("last_stage_number")
     )
@@ -283,10 +271,6 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         .then(pl.col("disposition_reason"))
         .otherwise(pl.lit(None, dtype=pl.Utf8))
         .alias("disposition_reason"),
-        pl.when(is_last)
-        .then(pl.col("on_time_offer_accept"))
-        .otherwise(pl.lit(None, dtype=pl.Utf8))
-        .alias("on_time_offer_accept"),
     )
 
     # Helper flags
@@ -314,17 +298,9 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         "candidate_recruiting_status",
         "recruiting_agency",
         "source",
-        "consolidated_channel",
-        "internal_external",
         "disposition_reason",
-        "is_dispo",
-        "consolidated_disposition",
-        "consolidated_disposition_2",
-        "is_non_auto_dispo",
-        "is_candidate_driven_dispo",
         "in_process_count",
         "completed_count",
-        "on_time_offer_accept",
     ]
     return long.select([c for c in order_cols if c in long.columns])
 
@@ -334,9 +310,8 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
 # ═════════════════════════════════════════════
 
 def extract(config: PipelineConfig) -> dict:
-    status_path = latest_file(config["RAW_DATA_ROOT"], config["ALL_STATUS_PATTERN"])
-    refresh_date = extract_date_from_filename(status_path)
-    app_cutoff = date(refresh_date.year - 4, 1, 1)
+    run_date = date.today()
+    app_cutoff = date(run_date.year - 4, 1, 1)
 
     app_path = latest_file(config["RAW_DATA_ROOT"], config["DAILY_APP_PATTERN"])
     app_lf = (
@@ -345,18 +320,10 @@ def extract(config: PipelineConfig) -> dict:
         .rename(APP_RENAME_MAP)
     )
 
-    parq_path: Path = config["OUTPUT_JOBREQS_PAR"]
-    if not parq_path.exists():
-        raise FileNotFoundError(f"No jobreq parq found at {parq_path}")
-    jobreq_lf = pl.scan_parquet(parq_path)
-
     return {
         "app_lf": app_lf,
-        "dispo_map_lf": dispo_map_lf,
-        "source_map_lf": source_map_lf,
-        "jobreq_lf": jobreq_lf,
         "app_cutoff": app_cutoff,
-        "refresh_date": refresh_date,
+        "run_date": run_date,
     }
 
 
@@ -397,32 +364,29 @@ def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
     ])
 
 
+_VALID_GRADES: Final[list[str]] = [
+    "Level 1", "Level 2", "Level 3", "Level 4",
+    "Level 5", "Level 6", "Level 7", "Level 8",
+]
+
+
 def transform(raw: dict, config: PipelineConfig) -> dict:
     lf: pl.LazyFrame = raw["app_lf"]
-    dispo_map_lf: pl.LazyFrame = raw["dispo_map_lf"]
-    source_map_lf: pl.LazyFrame = raw["source_map_lf"]
-    jobreq_lf: pl.LazyFrame = raw["jobreq_lf"]
     app_cutoff: date = raw["app_cutoff"]
 
     # Schema of the raw CSV (cheap metadata read; used for pre-join guards)
     schema = set(lf.collect_schema().names())
-
-    # Fill missing source
-    if "source" in schema:
-        lf = lf.with_columns(
-            pl.col("source").fill_null("zzz_unknown").cast(pl.Utf8)
-        )
 
     # Parse date columns
     date_exprs = [_parse_date(c) for c in DATE_COLS if c in schema]
     if date_exprs:
         lf = lf.with_columns(date_exprs)
 
-    # Filter by cutoff and remove Level 9
+    # Filter by cutoff and keep only Level 1–8
     if "job_application_date" in schema:
         lf = lf.filter(pl.col("job_application_date") >= app_cutoff)
     if "compensation_grade" in schema:
-        lf = lf.filter(pl.col("compensation_grade") != "Level 9")
+        lf = lf.filter(pl.col("compensation_grade").is_in(_VALID_GRADES))
 
     # Audit originals before corrections
     orig_cols = [c for c in ("last_recruiting_stage", "candidate_recruiting_status", "disposition_reason") if c in schema]
@@ -437,11 +401,8 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
             pl.col("last_recruiting_stage").replace(STAGE_MAP, default=None).cast(pl.Int8).alias("last_stage_number")
         )
 
-    # Post-join schema (includes columns added by joins)
-    post_schema = set(lf.collect_schema().names())
-
     # Recruiter offer ID (digits only; blank → zzz_blank)
-    if "recruiter_completed_offer" in post_schema:
+    if "recruiter_completed_offer" in schema:
         cleaned = pl.col("recruiter_completed_offer").cast(pl.Utf8).str.replace_all(r"\D+", "")
         lf = lf.with_columns(
             pl.when(cleaned == "").then(pl.lit("zzz_blank")).otherwise(cleaned).alias("recruiter_completed_offer_id")
@@ -452,15 +413,15 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
     final_cols = [c for c in RAW_COLS_SNAKE + ENGINEERED_COLS if c in final_schema]
     lf = lf.select(final_cols)
 
-    # Offer-stage slice: Offer (6) → Ready for Hire (8), used for on-time offer computation
-    offer_lf = lf.filter(pl.col("last_stage_number") >= OFFER_STAGE_MIN)
+    # Offer-accepts slice: candidates who accepted an offer
+    offer_accepts_lf = lf.filter(pl.col("candidate_recruiting_status") == "Offer Accepted")
 
     with stage_timer("⏱  Transf Funnel •"):
         funnel_lf = _transform_funnel(lf.collect(), config).lazy()
 
     return {
         "apps": lf,
-        "offer_stage": offer_lf,
+        "offer_accepts": offer_accepts_lf,
         "funnel": funnel_lf,
     }
 
@@ -475,8 +436,8 @@ def load(dfs: dict, config: PipelineConfig) -> None:
         apps_df.write_csv(config["OUTPUT_APPS_CSV"])
         apps_df.write_parquet(config["OUTPUT_APPS_PAR"], compression="zstd")
 
-    with stage_timer("⏱  Load offer stage •"):
-        dfs["offer_stage"].collect().write_parquet(config["OUTPUT_APPS_OFFER_PAR"], compression="zstd")
+    with stage_timer("⏱  Load offer accepts •"):
+        dfs["offer_accepts"].collect().write_parquet(config["OUTPUT_APPS_OFFER_ACCEPTS_PAR"], compression="zstd")
 
     with stage_timer("⏱  Load funnel •"):
         dfs["funnel"].collect().write_parquet(config["OUTPUT_FUNNEL_PAR"])
