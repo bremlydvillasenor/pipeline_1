@@ -6,7 +6,7 @@ Processes daily application CSV exports from Workday into two output datasets:
 
 1. **`applications.parquet`** — One row per candidate-application, enriched and cleaned
 2. **`app_funnel.parquet`** — One row per candidate-per-stage reached (exploded view for funnel analytics)
-3. **`applications_offer_accepts.parquet`** — One row per offer data, enrich with recruiter who deliver offer 
+3. **`offer_accepts.parquet`** — One row per offer data, enrich with recruiter who deliver offer 
 
 ```
 Daily Application CSV (skip 16 rows)
@@ -391,18 +391,6 @@ One row per candidate application.
 | `disposition_reason_orig` | Utf8 | Engineered | Pre-correction snapshot |
 | `recruiter_completed_offer_id` | Utf8 | Engineered | Digits only; blank → "zzz_blank" |
 | `last_stage_number` | Int8 | Engineered | Mapped from stage name via STAGE_MAP |
-| `consolidated_disposition` | Utf8 | dispo_map join | |
-| `consolidated_disposition_2` | Utf8 | dispo_map join | |
-| `consolidated_channel` | Utf8 | source_map join | |
-| `channel_sort` | Utf8 | source_map join | |
-| `internal_external` | Utf8 | source_map join | |
-| `is_non_auto_dispo` | Utf8 | dispo_map join | |
-| `is_candidate_driven_dispo` | Utf8 | dispo_map join | |
-| `function` | Utf8 | jobreq join | |
-| `sub_function` | Utf8 | jobreq join | |
-| `rag_target_offer_acceptance_date` | Date | jobreq join | |
-| `on_time_offer_accept` | Utf8 | Engineered | "Yes" or "" |
-| `complexity` | Utf8 | jobreq join | |
 
 ### `app_funnel.parquet`
 
@@ -414,25 +402,16 @@ One row per candidate per funnel stage reached. Derived from `applications`.
 | `candidate_id` | Utf8 | |
 | `added_date` | Date | |
 | `job_application_date` | Date | Truncated to month-start |
-| `last_stage_number` | Int16 | Coerced (5→4, 7→6) |
-| `stage_number` | Int16 | Stage for this row (1,2,3,4,6,8) |
+| `last_stage_number` | Int16 |
+| `stage_number` | Int16 |
 | `stage` | Utf8 | Label: "Review", "Screen", etc. |
 | `candidate_recruiting_status` | Utf8 | "Passed" for non-last rows; true status for last |
 | `recruiting_agency` | Utf8 | |
 | `source` | Utf8 | |
-| `consolidated_channel` | Utf8 | |
-| `internal_external` | Utf8 | |
 | `disposition_reason` | Utf8 | NULL for non-last rows |
-| `is_dispo` | Utf8 | From dispo_map join |
-| `consolidated_disposition` | Utf8 | From dispo_map join |
-| `consolidated_disposition_2` | Utf8 | From dispo_map join |
-| `is_non_auto_dispo` | Utf8 | From dispo_map join |
-| `is_candidate_driven_dispo` | Utf8 | From dispo_map join |
-| `in_process_count` | Int8 | 1 if still in-process at this stage |
-| `completed_count` | Int8 | 1 if completed this stage |
-| `on_time_offer_accept` | Utf8 | NULL for non-last rows |
 
-### `applications_offer_accepts.parquet`
+
+### `offer_accepts.parquet`
 
 Filtered slice of `applications` where candidate_recruiting_status = "Offer Accepted".
 Schema is identical to `applications.parquet`.
