@@ -1,0 +1,9 @@
+reporting_date,location,function,sub_function,job_grade,employee_id
+2025-01-31,Manila,Engineering,Frontend,3,EMP-200
+2025-01-31,Manila,Engineering,Backend,4,EMP-201
+2025-01-31,Cebu,Finance,FP&A,2,EMP-202
+2025-01-31,Manila,Operations,HR,5,EMP-203
+2025-02-28,Manila,Engineering,Frontend,3,EMP-200
+2025-02-28,Manila,Engineering,Backend,4,EMP-201
+2025-02-28,Cebu,Finance,FP&A,2,EMP-202
+2025-02-28,Manila,Operations,HR,5,EMP-203

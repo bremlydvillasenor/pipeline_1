@@ -1,0 +1,5 @@
+candidate_id,job_requisition_id,referred_by_employee_id,referred_by,added_date,source,disposition_reason,candidate_recruiting_status
+CAND-010,JR-001,EMP-100,Bob Jones (100),2025-01-15,ERP Referral,,Prospect
+CAND-011,JR-002,EMP-101,Jane Doe (101),2025-02-01,ERP Referral,,Prospect
+CAND-012,JR-003,EMP-102,Carol White (102),2025-01-20,Referral,Not a Fit,Rejected
+CAND-013,JR-004,EMP-100,Bob Jones (100),2025-02-10,ERP Referral,,Prospect
