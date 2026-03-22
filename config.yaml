@@ -22,6 +22,7 @@ output_hires_par: "hires.parquet"
 
 output_apps_csv: "applications.csv"
 output_apps_par: "applications.parquet"
+output_apps_offer_accepts_par: "applications_offer_accepts.parquet"
 output_funnel_par: "app_funnel.parquet"
 
 output_referrals_par: "referrals.parquet"
