@@ -8,7 +8,7 @@ from typing import Any, Final
 
 import polars as pl
 
-from .utils import latest_file, extract_date_from_filename
+from _utils import latest_file, extract_date_from_filename
 
 
 # ═════════════════════════════════════════════
