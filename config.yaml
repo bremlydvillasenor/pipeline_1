@@ -14,7 +14,6 @@ daily_app_pattern: "MBPS Daily Application_2*.csv"
 prospect_pattern: "Referrals Without Job Applications*.xlsx"
 headcount_pattern: "pmd_monthly_headcount.xlsx"
 
-output_jobreqs_open_dmt: "jobreqs2_open_dmt.csv"
 output_jobreqs_par: "jobreqs.parquet"
 
 output_hiresdb_par: "hiresdb.parquet"

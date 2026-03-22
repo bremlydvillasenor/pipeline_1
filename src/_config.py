@@ -38,7 +38,6 @@ def load_config(config_name="default.yaml", config_dir=None):
 
         "SCRUM_FILE": data_root / cfg["historical_data_root"] / cfg["scrum_file"],
 
-        "OUTPUT_JOBREQS_OPENDMT_CSV": data_root / cfg["processed_data_root"] / cfg["output_jobreqs_open_dmt"],
         "OUTPUT_JOBREQS_PAR": data_root / cfg["processed_data_root"] / cfg["output_jobreqs_par"],
 
         "OUTPUT_HIRES_PAR": data_root / cfg["processed_data_root"] / cfg["output_hires_par"],
