@@ -130,7 +130,7 @@ FUNNEL_REQUIRED_COLS: Final[set[str]] = {
     "last_stage_number",
 }
 
-FUNNEL_VALID_STAGES: Final[list[int]] = [1, 2, 3, 4, 6, 8]
+FUNNEL_VALID_STAGES: Final[list[int]] = [1, 2, 3, 4, 5, 6, 8]
 
 FUNNEL_STAGE_LABELS: Final[dict[int, str]] = {
     1: "Review",
@@ -269,23 +269,6 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         .then(pl.col("disposition_reason"))
         .otherwise(pl.lit(None, dtype=pl.Utf8))
         .alias("disposition_reason"),
-        pl.when(is_last)
-        .then(pl.col("on_time_offer_accept"))
-        .otherwise(pl.lit(None, dtype=pl.Utf8))
-        .alias("on_time_offer_accept"),
-    )
-
-    # Helper flags
-    status_norm = pl.col("candidate_recruiting_status").str.strip_chars().str.to_lowercase()
-    long = long.with_columns(
-        pl.when(status_norm == _APPLICATION_IN_PROCESS)
-        .then(pl.lit(1, dtype=pl.Int8))
-        .otherwise(pl.lit(0, dtype=pl.Int8))
-        .alias("in_process_count"),
-        pl.when(status_norm != _APPLICATION_IN_PROCESS)
-        .then(pl.lit(1, dtype=pl.Int8))
-        .otherwise(pl.lit(0, dtype=pl.Int8))
-        .alias("completed_count"),
     )
 
     # Final column order (only those present)
@@ -300,17 +283,7 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         "candidate_recruiting_status",
         "recruiting_agency",
         "source",
-        "consolidated_channel",
-        "internal_external",
-        "disposition_reason",
-        "is_dispo",
-        "consolidated_disposition",
-        "consolidated_disposition_2",
-        "is_non_auto_dispo",
-        "is_candidate_driven_dispo",
-        "in_process_count",
-        "completed_count",
-        "on_time_offer_accept",
+        "disposition_reason"
     ]
     return long.select([c for c in order_cols if c in long.columns])
 
@@ -396,7 +369,7 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
     if date_exprs:
         lf = lf.with_columns(date_exprs)
 
-    # Filter by cutoff and remove Level 9
+    # Filter by cutoff and filter only Level 1 to Level 8
     if "job_application_date" in schema:
         lf = lf.filter(pl.col("job_application_date") >= app_cutoff)
     if "compensation_grade" in schema:
@@ -430,7 +403,7 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
     final_cols = [c for c in RAW_COLS_SNAKE + ENGINEERED_COLS if c in final_schema]
     lf = lf.select(final_cols)
 
-    # Offer-stage slice: Offer (6) → Ready for Hire (8), used for on-time offer computation
+    # Offer-accept slice: Offer (6) used for on-time offer computation in power bi
     offer_lf = lf.filter(pl.col("last_stage_number") >= OFFER_STAGE_MIN)
 
     with stage_timer("⏱  Transf Funnel •"):
@@ -450,7 +423,6 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
 def load(dfs: dict, config: PipelineConfig) -> None:
     with stage_timer("⏱  Load apps •"):
         apps_df = dfs["apps"].collect()
-        apps_df.write_csv(config["OUTPUT_APPS_CSV"])
         apps_df.write_parquet(config["OUTPUT_APPS_PAR"], compression="zstd")
 
     with stage_timer("⏱  Load offer stage •"):
