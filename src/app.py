@@ -11,7 +11,7 @@ from typing import Any, Final
 
 import polars as pl
 
-from .utils.helpers import latest_file, extract_date_from_filename
+from .utils import latest_file, extract_date_from_filename
 
 
 # ═════════════════════════════════════════════
@@ -137,7 +137,9 @@ FUNNEL_STAGE_LABELS: Final[dict[int, str]] = {
     2: "Screen",
     3: "Assessment",
     4: "Interview",
+    5: "Reference Check",
     6: "Offer",
+    7: "Background Check",
     8: "Ready for Hire",
 }
 
