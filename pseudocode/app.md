@@ -76,7 +76,7 @@ ENGINEERED_COLS = [
 ```
 FUNCTION extract(config):
 
-    # Determine refresh date and application lookback window
+    # Determine run date and application lookback window
     status_path  ← latest_file(RAW_DATA_ROOT, ALL_STATUS_PATTERN)
     run_date ← current date
     app_cutoff   ← date(run_date.year - 4, month=1, day=1)
