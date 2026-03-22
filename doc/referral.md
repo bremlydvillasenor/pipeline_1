@@ -39,7 +39,9 @@ The source filter uses the regex `(?i)ERP|Referral` applied to the `source` colu
 | Screen | 2 |
 | Assessment | 3 |
 | Interview | 4 |
+| Reference Check | 5 |
 | Offer | 6 |
+| Background Check | 5 |
 | Ready for Hire | 8 |
 
 ---
@@ -127,7 +129,6 @@ where `YYYY-MM` is derived from `added_date`.
 | `added_date` | `Date` | Parsed from multiple date formats |
 | `source` | `Utf8` | Contains "ERP" or "Referral" |
 | `disposition_reason` | `Utf8` | |
-| `consolidated_disposition` | `Utf8` | From funnel only; null for prospects |
 | `candidate_recruiting_status` | `Utf8` | |
 | `last_stage_number` | `Int16` | 0 for all prospect_review rows |
 
