@@ -1,22 +1,24 @@
-# ─────────────────────────────────────────────────────────────
-# src/jobreq.py   ·   Job Requisitions ETL / cleansing
-# ─────────────────────────────────────────────────────────────
+# src/jobreq.py  ·  Job Requisitions ETL
+# Source:
+#   - All-Status Excel (Workday requisition all-status report)
+# Produces:
+#   - OUTPUT_JOBREQS_PAR  (cleansed, deduplicated requisitions parquet)
+#   - refresh_date.csv    (date token for downstream stages)
+
 from __future__ import annotations
 
 import logging
-import warnings
 import re
-from pathlib import Path
+import warnings
 from contextlib import contextmanager
+from datetime import date
+from pathlib import Path
 from time import perf_counter
+from typing import Final
 
-import pandas as pd
 import polars as pl
 
-from src.utils.helpers import (
-    latest_file,
-    extract_date_from_filename,
-)
+from ._utils import latest_file, extract_date_from_filename
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
@@ -24,8 +26,42 @@ _LOG_FORMAT = "%(asctime)s ▸ %(levelname)-8s ▸ %(name)s ▸ %(message)s"
 logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
 log = logging.getLogger(__name__)
 
+
 # ─────────────────────────────────────────────────────────────
-# Utilities
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────
+
+# All-Status Excel: 13 preamble rows before the header row
+ALL_STATUS_SKIP_ROWS: Final[int] = 13
+
+# Columns selected from the All-Status file (after snake_case rename)
+INPUT_COLS: Final[list[str]] = [
+    "job_requisition_id",
+    "target_hire_date",
+    "positions_filled_hire_selected",
+    "positions_openings_available",
+    "mbps_teams",
+]
+
+# Cast rules applied to each input column
+INPUT_DTYPES: Final[dict[str, pl.DataType]] = {
+    "job_requisition_id":             pl.Utf8,
+    "target_hire_date":               pl.Date,
+    "positions_filled_hire_selected": pl.Int16,
+    "positions_openings_available":   pl.Int16,
+    "mbps_teams":                     pl.Utf8,
+}
+
+# Final output schema — input columns + computed columns
+OUTPUT_SCHEMA: Final[dict[str, pl.DataType]] = {
+    **INPUT_DTYPES,
+    "positions_requested_new": pl.Int16,
+    "jobreq_status":           pl.Utf8,
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# UTILITIES
 # ─────────────────────────────────────────────────────────────
 
 @contextmanager
@@ -46,7 +82,7 @@ def _to_snake(name: str) -> str:
 
 
 def _build_rename_map(columns: list[str]) -> dict[str, str]:
-    """Snake_case + de-duplicate rename map for a list of column names."""
+    """Snake_case + de-duplicate rename map for a list of raw column names."""
     counts: dict[str, int] = {}
     result: dict[str, str] = {}
     for col in columns:
@@ -60,47 +96,64 @@ def _build_rename_map(columns: list[str]) -> dict[str, str]:
     return result
 
 
-# ────────────── INDIVIDUAL EXTRACTS ──────────────
+# ─────────────────────────────────────────────────────────────
+# EXTRACT
+# ─────────────────────────────────────────────────────────────
 
-def _extract_refresh_date(config: dict) -> pd.Timestamp:
-    """Most-recent All-Status file date token → refresh_date."""
+def extract(config: dict, cutoff: date) -> pl.LazyFrame:
+    """
+    Read the All-Status Excel, promote the header row, rename to snake_case,
+    select INPUT_COLS, cast to INPUT_DTYPES, and filter rows where
+    target_hire_date >= cutoff.
+
+    Returns a LazyFrame ready for transform().
+    """
     path = latest_file(config["RAW_DATA_ROOT"], config["ALL_STATUS_PATTERN"])
-    return extract_date_from_filename(path)
+    log.info("Reading all-status: %s", path.name)
 
-
-def _extract_status(config: dict, jobreq_cutoff: pd.Timestamp) -> pl.LazyFrame:
-    """All-Status sheet → cleansed & filtered status LazyFrame (snake_case)."""
-    path = latest_file(config["RAW_DATA_ROOT"], config["ALL_STATUS_PATTERN"])
-    log.info("%s", path.name)
-
-    # Read with header row offset, extract header from first data row
-    raw = pl.read_excel(path, has_header=False, read_options={"skip_rows": 13})
+    raw = pl.read_excel(path, has_header=False, read_options={"skip_rows": ALL_STATUS_SKIP_ROWS})
     headers = [str(v) for v in raw.row(0)]
     df = raw.slice(1).rename(dict(zip(raw.columns, headers)))
     df = df.rename(_build_rename_map(df.columns))
 
-    usecols = [
-        "job_requisition_id",
-        "target_hire_date",
-        "positions_filled_hire_selected",
-        "positions_openings_available",
-        "mbps_teams",
-    ]
-    cutoff = jobreq_cutoff.to_pydatetime().date()
+    present = [c for c in INPUT_COLS if c in df.columns]
+    missing = set(INPUT_COLS) - set(present)
+    if missing:
+        log.warning("Expected input columns not found: %s", sorted(missing))
 
     return (
         df.lazy()
-        .select(usecols)
+        .select(present)
         .with_columns([
-            pl.col("target_hire_date").cast(pl.Date, strict=False),
-            pl.col("positions_filled_hire_selected").cast(pl.Int16, strict=False),
-            pl.col("positions_openings_available").cast(pl.Int16, strict=False),
+            pl.col(c).cast(INPUT_DTYPES[c], strict=False)
+            for c in present
         ])
         .filter(pl.col("target_hire_date") >= pl.lit(cutoff))
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# TRANSFORM
+# ─────────────────────────────────────────────────────────────
+
+def transform(lf: pl.LazyFrame) -> pl.DataFrame:
+    """
+    Deduplicate on job_requisition_id (keep latest target_hire_date),
+    compute positions_requested_new and jobreq_status, then enforce
+    OUTPUT_SCHEMA.
+
+    jobreq_status logic:
+      - CAN    → positions_requested_new == 0
+      - OPEN   → positions_openings_available > 0
+      - FILLED → otherwise
+    """
+    df = (
+        lf
         .sort("target_hire_date", descending=True)
         .unique(subset=["job_requisition_id"], keep="first", maintain_order=True)
         .with_columns(
             (pl.col("positions_openings_available") + pl.col("positions_filled_hire_selected"))
+            .cast(pl.Int16)
             .alias("positions_requested_new")
         )
         .with_columns(
@@ -109,90 +162,68 @@ def _extract_status(config: dict, jobreq_cutoff: pd.Timestamp) -> pl.LazyFrame:
             .otherwise(pl.lit("FILLED"))
             .alias("jobreq_status")
         )
+        .collect()
     )
 
-# ────────────── BUNDLED EXTRACT ──────────────
-
-def extract_all(config: dict, jobreq_cutoff: pd.Timestamp) -> dict:
-    """Return every LazyFrame needed for transforms (already snake_case)."""
-    return {
-        "status": _extract_status(config, jobreq_cutoff),
-        "scrum": _extract_scrum(config),
-        "dmt": _extract_dmt(config),
-        "thd_corr": _extract_thd_corr(config),
-    }
+    # Enforce output schema — cast and select in declared order
+    return df.select([
+        pl.col(c).cast(OUTPUT_SCHEMA[c])
+        for c in OUTPUT_SCHEMA
+        if c in df.columns
+    ])
 
 
-# ────────────── LOAD ──────────────
+# ─────────────────────────────────────────────────────────────
+# LOAD
+# ─────────────────────────────────────────────────────────────
 
-def load_outputs(dfs: dict, refresh_date: pd.Timestamp, config: dict):
-    with stage_timer("⏱  Load •"):
-        jobreq: pl.DataFrame = dfs["jobreq"]
-        jobreq.write_csv(config["OUTPUT_JOBREQS_CSV"], date_format="%Y-%m-%d")
-        jobreq.write_parquet(config["OUTPUT_JOBREQS_PAR"])
+def load(df: pl.DataFrame, config: dict, refresh_date: date) -> None:
+    out_path = Path(config["OUTPUT_JOBREQS_PAR"])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.write_parquet(out_path, compression="zstd")
+    log.info("Jobreqs written → %s (%d rows)", out_path.name, df.height)
 
-        cols = [
-            "job_requisition_id",
-            "job_requisition",
-            "function",
-            "compensation_grade",
-            "complexity",
-            "main_recruiter_id",
-            "main_recruiter",
-            "positions_openings_available",
-            "target_hire_date",
-            "hiring_manager",
-        ]
-        jobreq_cols = [c for c in cols if c in jobreq.columns]
-        open_reqs = jobreq.filter(pl.col("positions_openings_available") > 0).select(jobreq_cols)
-
-        dmt_open: pl.DataFrame = dfs["dmt_open"]
-        dmt_cols = [c for c in cols if c in dmt_open.columns]
-        combined = pl.concat([open_reqs, dmt_open.select(dmt_cols)], how="diagonal")
-        combined.write_csv(config["OUTPUT_JOBREQS_OPENDMT_CSV"], date_format="%Y-%m-%d")
-
-        # Refresh marker
-        pl.DataFrame({"refresh_date": [refresh_date.to_pydatetime().date()]}).write_csv(
-            Path(config["PROCESSED_DATA_ROOT"]) / "refresh_date.csv"
-        )
+    pl.DataFrame({"refresh_date": [refresh_date]}).write_csv(
+        Path(config["PROCESSED_DATA_ROOT"]) / "refresh_date.csv"
+    )
 
 
-# ────────────── MISC ──────────────
+# ─────────────────────────────────────────────────────────────
+# MAIN PIPELINE
+# ─────────────────────────────────────────────────────────────
 
-def _backlog_count(df: pl.DataFrame, refresh_date: pd.Timestamp) -> int:
-    rd = refresh_date.to_pydatetime().date()
-    return int(df.filter(pl.col("target_hire_date") <= pl.lit(rd))["positions_openings_available"].sum() or 0)
-
-
-# ────────────── MAIN PIPELINE ──────────────
-
-def run_jobreq(config: dict) -> tuple[pl.DataFrame, pd.Timestamp]:
+def run_jobreq(config: dict) -> tuple[pl.DataFrame, date]:
     """
     End-to-end Job Requisitions ETL.
-    Returns the final jobreq DataFrame.
+
+    Returns
+    -------
+    jobreq_df    : pl.DataFrame  – cleansed, deduplicated requisitions
+    refresh_date : datetime.date – date token from the source filename
     """
-    _t0_run = perf_counter()
+    _t0 = perf_counter()
 
-    refresh_date = _extract_refresh_date(config)
+    path = latest_file(config["RAW_DATA_ROOT"], config["ALL_STATUS_PATTERN"])
+    refresh_date: date = extract_date_from_filename(path).date()
+    years_scope: int = config.get("REQS_YEARS_SCOPE", 1)
+    cutoff = date(refresh_date.year - years_scope, 1, 1)
+
     log.info("──────────────────────────────")
-    log.info("🚀 Jobreq ETL started (refresh date=%s) ", refresh_date.date())
-
-    years_scope = config.get("REQS_YEARS_SCOPE", 1)
-    jobreq_cutoff = pd.Timestamp(refresh_date.year - years_scope, 1, 1)
-    log.info("Scope THD ≥ %s", jobreq_cutoff.date())
+    log.info("🚀 Jobreq ETL started  (refresh=%s  scope≥%s)", refresh_date, cutoff)
 
     with stage_timer("⏱  Extract •"):
-        extracts = extract_all(config, jobreq_cutoff)
+        lf = extract(config, cutoff)
 
-    dfs = transform_all(extracts, refresh_date)
+    with stage_timer("⏱  Transform •"):
+        jobreq_df = transform(lf)
 
-    load_outputs(dfs, refresh_date, config)
+    with stage_timer("⏱  Load •"):
+        load(jobreq_df, config, refresh_date)
 
-    log.info("Final Stats...")
-    log.info("Backlog positions : %d", _backlog_count(dfs["jobreq"], refresh_date))
-    log.info("Jobreqs rows=%d · cols=%d", dfs["jobreq"].shape[0], dfs["jobreq"].shape[1])
-    log.info("DMT open rows=%d", len(dfs["dmt_open"]))
-    log.info("✅ Jobreq ETL completed • duration : %.2fs", perf_counter() - _t0_run)
+    status_counts = jobreq_df["jobreq_status"].value_counts().to_dicts()
+    counts_str = "  ".join(f"{r['jobreq_status']}={r['count']}" for r in status_counts)
+    log.info("Final stats  rows=%d  %s", jobreq_df.height, counts_str)
+    log.info("✅ Jobreq ETL completed • duration: %.2fs", perf_counter() - _t0)
     log.info("──────────────────────────────")
 
-    return dfs["jobreq"], refresh_date
+    return jobreq_df, refresh_date
