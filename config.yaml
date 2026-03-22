@@ -21,9 +21,9 @@ output_apps_par: "applications.parquet"
 output_offer_accepts_par: "offer_accepts.parquet"
 output_funnel_par: "app_funnel.parquet"
 
-output_referrals_par: "referrals.parquet"
-output_referrals_funnel_par: "referrals_funnel.parquet"
-output_mheadcount_par: "monthly_headcount.parquet"
+output_referral_par: "referrals.parquet"
+output_referral_funnel_par: "referrals_funnel.parquet"
+output_erp_par: "erp.parquet"
 
 reqs_years_scope: 3
 
