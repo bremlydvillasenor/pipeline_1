@@ -1,35 +1,33 @@
 import sys
+import pathlib
 
-import sys, pathlib
-#print("cwd:", pathlib.Path.cwd())
-#print("sys.path[0]:", sys.path[0])
-
-#Import the revised config loader
 from src import (
-    load_config, 
-    run_jobreq, 
+    load_config,
+    run_jobreq,
     run_hire,
     run_app,
     run_referral,
-    run_erp,
-    run_backup
+    run_backup,
 )
+from src.erp import run_erp
+from src._utils import setup_logging
 
-#Load config (switch YAML files as needed)
+# Load config
 config = load_config("config.yaml")
 
-#Run jobreq processing!
-run_jobreq(config)
+# Configure logging (console + daily log file)
+setup_logging(config["LOG_DIR"])
 
-#Run hire processing!
+# Run pipeline stages
+jobreq_df, refresh_date = run_jobreq(config)
+
 run_hire(config)
 
-#Run app processing!
 run_app(config)
 
-#Run referral and erp processing!
-run_referral(config)
-run_erp(config)
+referrals_df, unique_referrals_df = run_referral(config)
 
-#Backup Project
+run_erp(config, unique_referrals_df)
+
+# Backup project
 run_backup()

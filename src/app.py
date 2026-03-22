@@ -8,18 +8,11 @@ from typing import Any, Final
 
 import polars as pl
 
-from _utils import latest_file, extract_date_from_filename
+from ._utils import latest_file
 
-
-# ═════════════════════════════════════════════
-# LOGGING
-# ═════════════════════════════════════════════
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s ▸ %(levelname)-8s ▸ %(name)s ▸ %(message)s",
-)
 log = logging.getLogger(__name__)
+
+_SEP = "─" * 50
 
 
 # ═════════════════════════════════════════════
@@ -90,7 +83,8 @@ RAW_COLS_SNAKE: Final[list[str]] = [
     "job_requisition_id", "job_requisition", "recruiting_instruction",
     "job_family", "compensation_grade",
     "worker_type_hiring_requirement", "worker_sub_type_hiring_requirement",
-    "target_hire_date", "added_date", "job_application_date", "offer_accepted_date", "candidate_start_date",
+    "target_hire_date", "added_date", "job_application_date",
+    "offer_accepted_date", "candidate_start_date",
     "recruiter_employee_id", "recruiter_completed_offer",
     "disposition_reason", "candidate_recruiting_status",
     "last_recruiting_stage", "hired", "hire_transaction_status", "source",
@@ -112,36 +106,22 @@ ENGINEERED_COLS: Final[list[str]] = [
 # ═════════════════════════════════════════════
 
 FUNNEL_REQUIRED_COLS: Final[set[str]] = {
-    "candidate_id",
-    "added_date",
-    "job_application_date",
-    "job_requisition_id",
-    "recruiting_agency",
-    "source",
-    "disposition_reason",
-    "candidate_recruiting_status",
-    "last_stage_number",
+    "candidate_id", "added_date", "job_application_date",
+    "job_requisition_id", "recruiting_agency", "source",
+    "disposition_reason", "candidate_recruiting_status", "last_stage_number",
 }
 
 FUNNEL_VALID_STAGES: Final[list[int]] = [1, 2, 3, 4, 6, 7, 8]
 
 FUNNEL_STAGE_LABELS: Final[dict[int, str]] = {
-    1: "Review",
-    2: "Screen",
-    3: "Assessment",
-    4: "Interview",
-    5: "Reference Check",
-    6: "Offer",
-    7: "Background Check",
-    8: "Ready for Hire",
+    1: "Review", 2: "Screen", 3: "Assessment", 4: "Interview",
+    5: "Reference Check", 6: "Offer", 7: "Background Check", 8: "Ready for Hire",
 }
 
-_FUNNEL_STAGE_MAP: pl.DataFrame = pl.DataFrame(
-    {
-        "stage_number": pl.Series(list(FUNNEL_STAGE_LABELS.keys()), dtype=pl.Int16),
-        "stage": pl.Series(list(FUNNEL_STAGE_LABELS.values()), dtype=pl.Utf8),
-    }
-)
+_FUNNEL_STAGE_MAP: pl.DataFrame = pl.DataFrame({
+    "stage_number": pl.Series(list(FUNNEL_STAGE_LABELS.keys()), dtype=pl.Int16),
+    "stage":        pl.Series(list(FUNNEL_STAGE_LABELS.values()), dtype=pl.Utf8),
+})
 
 _APPLICATION_IN_PROCESS: Final[str] = "application in process"
 
@@ -164,27 +144,21 @@ def _parse_date(col: str) -> pl.Expr:
 # ═════════════════════════════════════════════
 
 def _check_funnel_schema(df: pl.DataFrame) -> None:
-    """Raise ValueError if any required funnel input column is absent."""
     missing = FUNNEL_REQUIRED_COLS - set(df.columns)
     if missing:
-        raise ValueError(
-            f"Input DataFrame is missing required columns: {sorted(missing)}"
-        )
+        raise ValueError(f"Funnel input missing required columns: {sorted(missing)}")
 
 
 def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
-
     if not isinstance(df, pl.DataFrame):
         raise TypeError(f"Expected a Polars DataFrame, got {type(df).__name__}")
-
     if df.is_empty():
         return df
 
     _check_funnel_schema(df)
-
     df = df.select([c for c in df.columns if c in FUNNEL_REQUIRED_COLS])
 
-    # Coerce last_stage_number; map 5→4 (Reference Check → Interview)
+    # Coerce last_stage_number; map 5 → 4 (Reference Check → Interview)
     df = df.with_columns(
         pl.when(pl.col("last_stage_number").cast(pl.Int16, strict=False) == 5)
         .then(pl.lit(4, dtype=pl.Int16))
@@ -200,11 +174,10 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         .alias("job_application_date")
     )
 
-    # Tag rows where the candidate is still in-process
+    # Tag in-process rows
     df = df.with_columns(
         pl.col("candidate_recruiting_status")
-        .str.strip_chars()
-        .str.to_lowercase()
+        .str.strip_chars().str.to_lowercase()
         .eq(_APPLICATION_IN_PROCESS)
         .alias("_in_process")
     )
@@ -236,12 +209,9 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         .drop("_in_process")
     )
 
-    # Add stage label
     long = long.join(_FUNNEL_STAGE_MAP, on="stage_number", how="left")
 
-    # Status / disposition: only last stage row keeps truth
     is_last = pl.col("last_stage_number") == pl.col("stage_number")
-
     long = long.with_columns(
         pl.when(is_last)
         .then(pl.col("candidate_recruiting_status"))
@@ -253,43 +223,12 @@ def _transform_funnel(df: pl.DataFrame, config: PipelineConfig) -> pl.DataFrame:
         .alias("disposition_reason"),
     )
 
-    # Final column order (only those present)
     order_cols = [
-        "job_requisition_id",
-        "candidate_id",
-        "added_date",
-        "job_application_date",
-        "last_stage_number",
-        "stage_number",
-        "stage",
-        "candidate_recruiting_status",
-        "recruiting_agency",
-        "source",
-        "disposition_reason",
+        "job_requisition_id", "candidate_id", "added_date", "job_application_date",
+        "last_stage_number", "stage_number", "stage",
+        "candidate_recruiting_status", "recruiting_agency", "source", "disposition_reason",
     ]
     return long.select([c for c in order_cols if c in long.columns])
-
-
-# ═════════════════════════════════════════════
-# EXTRACT
-# ═════════════════════════════════════════════
-
-def extract(config: PipelineConfig) -> dict:
-    run_date = date.today()
-    app_cutoff = date(run_date.year - 4, 1, 1)
-
-    app_path = latest_file(config["RAW_DATA_ROOT"], config["DAILY_APP_PATTERN"])
-    app_lf = (
-        pl.scan_csv(app_path, skip_rows=16)
-        .select(list(APP_RENAME_MAP.keys()))
-        .rename(APP_RENAME_MAP)
-    )
-
-    return {
-        "app_lf": app_lf,
-        "app_cutoff": app_cutoff,
-        "run_date": run_date,
-    }
 
 
 # ═════════════════════════════════════════════
@@ -297,7 +236,6 @@ def extract(config: PipelineConfig) -> dict:
 # ═════════════════════════════════════════════
 
 def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """Correct stage and disposition for rescinded offers."""
     needed = {
         "hire_transaction_status", "hired",
         "last_recruiting_stage_orig", "candidate_recruiting_status_orig",
@@ -319,14 +257,34 @@ def _apply_rescind_correction(lf: pl.LazyFrame) -> pl.LazyFrame:
 
     return lf.with_columns([
         pl.when(stage_update)
-          .then(pl.lit("Offer"))
-          .otherwise(pl.col("last_recruiting_stage"))
-          .alias("last_recruiting_stage"),
+        .then(pl.lit("Offer"))
+        .otherwise(pl.col("last_recruiting_stage"))
+        .alias("last_recruiting_stage"),
         pl.when(rescind_mask)
-          .then(pl.lit("Offer Accepted to Rescinded"))
-          .otherwise(pl.col("disposition_reason"))
-          .alias("disposition_reason"),
+        .then(pl.lit("Offer Accepted to Rescinded"))
+        .otherwise(pl.col("disposition_reason"))
+        .alias("disposition_reason"),
     ])
+
+
+# ═════════════════════════════════════════════
+# EXTRACT
+# ═════════════════════════════════════════════
+
+def extract(config: PipelineConfig) -> dict:
+    run_date   = date.today()
+    app_cutoff = date(run_date.year - 4, 1, 1)
+
+    app_path = latest_file(config["RAW_DATA_ROOT"], config["DAILY_APP_PATTERN"])
+    log.info("  source : %s", app_path.name)
+
+    app_lf = (
+        pl.scan_csv(app_path, skip_rows=16)
+        .select(list(APP_RENAME_MAP.keys()))
+        .rename(APP_RENAME_MAP)
+    )
+
+    return {"app_lf": app_lf, "app_cutoff": app_cutoff, "run_date": run_date}
 
 
 # ═════════════════════════════════════════════
@@ -339,57 +297,46 @@ def transform(raw: dict, config: PipelineConfig) -> dict:
 
     schema = set(lf.collect_schema().names())
 
-    # Fill null source before joins (prevents NULL key fan-out)
     if "source" in schema:
         lf = lf.with_columns(pl.col("source").fill_null("zzz_unknown"))
 
-    # Parse date columns
     date_exprs = [_parse_date(c) for c in DATE_COLS if c in schema]
     if date_exprs:
         lf = lf.with_columns(date_exprs)
 
-    # Filter: 4-year lookback and Level 1–8 grades only
     if "job_application_date" in schema:
         lf = lf.filter(pl.col("job_application_date") >= app_cutoff)
     if "compensation_grade" in schema:
         lf = lf.filter(pl.col("compensation_grade").is_in(VALID_GRADES))
 
-    # Audit originals before corrections
     orig_cols = [c for c in ("last_recruiting_stage", "candidate_recruiting_status", "disposition_reason") if c in schema]
     lf = lf.with_columns([pl.col(c).alias(f"{c}_orig") for c in orig_cols])
 
-    # Rescind offer correction
     lf = _apply_rescind_correction(lf)
 
-    # Stage number
     if "last_recruiting_stage" in schema:
         lf = lf.with_columns(
-            pl.col("last_recruiting_stage").replace(STAGE_MAP, default=None).cast(pl.Int8).alias("last_stage_number")
+            pl.col("last_recruiting_stage")
+            .replace(STAGE_MAP, default=None)
+            .cast(pl.Int8)
+            .alias("last_stage_number")
         )
 
-    # Recruiter offer ID (digits only; blank → zzz_blank)
     if "recruiter_completed_offer" in schema:
         cleaned = pl.col("recruiter_completed_offer").cast(pl.Utf8).str.replace_all(r"\D+", "")
         lf = lf.with_columns(
-            pl.when(cleaned == "").then(pl.lit("zzz_blank")).otherwise(cleaned).alias("recruiter_completed_offer_id")
+            pl.when(cleaned == "").then(pl.lit("zzz_blank")).otherwise(cleaned)
+            .alias("recruiter_completed_offer_id")
         )
 
-    # Final column ordering
     final_schema = set(lf.collect_schema().names())
-    final_cols = [c for c in RAW_COLS_SNAKE + ENGINEERED_COLS if c in final_schema]
-    lf = lf.select(final_cols)
+    final_cols   = [c for c in RAW_COLS_SNAKE + ENGINEERED_COLS if c in final_schema]
+    lf           = lf.select(final_cols)
 
-    # Offer-accepts slice: candidates who accepted an offer
     offer_accepts_lf = lf.filter(pl.col("candidate_recruiting_status") == "Offer Accepted")
+    funnel_lf        = _transform_funnel(lf.collect(), config).lazy()
 
-    # Funnel transform (collect → transform → lazy)
-    funnel_lf = _transform_funnel(lf.collect(), config).lazy()
-
-    return {
-        "apps": lf,
-        "offer_accepts": offer_accepts_lf,
-        "funnel": funnel_lf,
-    }
+    return {"apps": lf, "offer_accepts": offer_accepts_lf, "funnel": funnel_lf}
 
 
 # ═════════════════════════════════════════════
@@ -400,10 +347,15 @@ def load(dfs: dict, config: PipelineConfig) -> None:
     apps_df = dfs["apps"].collect()
     apps_df.write_parquet(config["OUTPUT_APPS_PAR"], compression="zstd")
     apps_df.write_csv(config["OUTPUT_APPS_CSV"])
+    log.info("  output : applications.parquet + .csv  (%d rows)", apps_df.height)
 
-    dfs["offer_accepts"].collect().write_parquet(config["OUTPUT_APPS_OFFER_ACCEPTS_PAR"], compression="zstd")
+    oa_df = dfs["offer_accepts"].collect()
+    oa_df.write_parquet(config["OUTPUT_OFFER_ACCEPTS_PAR"], compression="zstd")
+    log.info("  output : offer_accepts.parquet  (%d rows)", oa_df.height)
 
-    dfs["funnel"].collect().write_parquet(config["OUTPUT_FUNNEL_PAR"])
+    funnel_df = dfs["funnel"].collect()
+    funnel_df.write_parquet(config["OUTPUT_FUNNEL_PAR"])
+    log.info("  output : app_funnel.parquet  (%d rows)", funnel_df.height)
 
 
 # ═════════════════════════════════════════════
@@ -412,13 +364,14 @@ def load(dfs: dict, config: PipelineConfig) -> None:
 
 def run_app(config: PipelineConfig) -> dict:
     """Orchestrate full ETL for applications."""
-    log.info("🚀 App ETL started...")
+    log.info(_SEP)
+    log.info("[app] started")
 
-    ext = extract(config)
-    dfs = transform(ext, config)
+    ext  = extract(config)
+    dfs  = transform(ext, config)
     load(dfs, config)
 
-    log.info("✅ App ETL completed")
-    log.info("────────────────────────────────────")
+    log.info("[app] done")
+    log.info(_SEP)
 
     return dfs

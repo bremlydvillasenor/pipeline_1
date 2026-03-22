@@ -4,8 +4,7 @@ data_root: "data"
 raw_data_root: "raw"
 historical_data_root: "historical"
 processed_data_root: "processed"
-
-scrum_file: "ta_scrum_file.xlsx"
+external_data_root: "external"
 
 all_status_pattern: "MBPS Requisition - All Status*.xlsx"
 fulfillment_pattern: "*Fulfillment*.xlsx"
@@ -15,17 +14,17 @@ prospect_pattern: "Referrals Without Job Applications*.xlsx"
 headcount_pattern: "pmd_monthly_headcount.xlsx"
 
 output_jobreqs_par: "jobreqs.parquet"
-
 output_hiresdb_par: "hiresdb.parquet"
-output_hires_par: "hires.parquet"
 
 output_apps_csv: "applications.csv"
 output_apps_par: "applications.parquet"
-output_apps_offer_accepts_par: "applications_offer_accepts.parquet"
+output_offer_accepts_par: "offer_accepts.parquet"
 output_funnel_par: "app_funnel.parquet"
 
-output_referrals_par: "referrals.parquet"
-output_referrals_funnel_par: "referrals_funnel.parquet"
-output_mheadcount_par: "monthly_headcount.parquet"
+output_referral_par: "referrals.parquet"
+output_referral_funnel_par: "referrals_funnel.parquet"
+output_erp_par: "erp.parquet"
 
 reqs_years_scope: 3
+
+log_dir: "logs"
