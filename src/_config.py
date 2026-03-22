@@ -33,27 +33,24 @@ def load_config(config_name="default.yaml", config_dir=None):
 
         "DATA_ROOT": data_root,
         "RAW_DATA_ROOT": data_root / cfg["raw_data_root"],
+        "EXTERNAL_DATA_ROOT": data_root / cfg["external_data_root"],
         "HISTORICAL_DATA_ROOT": data_root / cfg["historical_data_root"],
         "PROCESSED_DATA_ROOT": data_root / cfg["processed_data_root"],
-
-        "SCRUM_FILE": data_root / cfg["historical_data_root"] / cfg["scrum_file"],
 
         "LOG_DIR": project_root / cfg["log_dir"],
 
         "OUTPUT_JOBREQS_PAR": data_root / cfg["processed_data_root"] / cfg["output_jobreqs_par"],
-
-        "OUTPUT_HIRES_PAR": data_root / cfg["processed_data_root"] / cfg["output_hires_par"],
         "OUTPUT_HIRESDB_PAR": data_root / cfg["historical_data_root"] / cfg["output_hiresdb_par"],
 
         "OUTPUT_APPS_CSV": data_root / cfg["processed_data_root"] / cfg["output_apps_csv"],
         "OUTPUT_APPS_PAR": data_root / cfg["processed_data_root"] / cfg["output_apps_par"],
-        "OUTPUT_APPS_OFFER_ACCEPTS_PAR": data_root / cfg["processed_data_root"] / cfg["output_apps_offer_accepts_par"],
+        "OUTPUT_OFFER_ACCEPTS_PAR": data_root / cfg["processed_data_root"] / cfg["output_offer_accepts_par"],
         "OUTPUT_FUNNEL_PAR": data_root / cfg["processed_data_root"] / cfg["output_funnel_par"],
 
-        "OUTPUT_REFERRALS_PARQUET": data_root / cfg["processed_data_root"] / cfg["output_referrals_par"],
-        "OUTPUT_REFERRALS_FUNNEL_PARQUET": data_root / cfg["processed_data_root"] / cfg["output_referrals_funnel_par"],
+        "OUTPUT_REFERRALS_PAR": data_root / cfg["processed_data_root"] / cfg["output_referrals_par"],
+        "OUTPUT_REFERRALS_FUNNEL_PAR": data_root / cfg["processed_data_root"] / cfg["output_referrals_funnel_par"],
         
-        "OUTPUT_MHEADCOUNT_PARQUET": data_root / cfg["processed_data_root"] / cfg["output_mheadcount_par"],
+        "OUTPUT_ERP_PARQUET": data_root / cfg["processed_data_root"] / cfg["output_erp_par"],
 
     }
 
